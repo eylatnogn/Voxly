@@ -19,7 +19,19 @@ export function TranscriptView() {
   const speakers = useVoxlyStore((s) => s.speakers)
   const suggestions = useVoxlyStore((s) => s.suggestions)
   const setError = useVoxlyStore((s) => s.setError)
+  const setSegmentSpeaker = useVoxlyStore((s) => s.setSegmentSpeaker)
+  const ensureSpeaker = useVoxlyStore((s) => s.ensureSpeaker)
   const [exporting, setExporting] = useState(false)
+
+  const changeSegmentSpeaker = (segmentId: string, value: string) => {
+    if (value === 'new') {
+      const nextId = speakers.length > 0 ? Math.max(...speakers.map((s) => s.id)) + 1 : 0
+      ensureSpeaker(nextId, 0)
+      setSegmentSpeaker(segmentId, nextId)
+    } else {
+      setSegmentSpeaker(segmentId, Number(value))
+    }
+  }
 
   const speakerById = useMemo(() => {
     const map = new Map<number, Speaker>()
@@ -92,12 +104,23 @@ export function TranscriptView() {
               }`}
             >
               <div className="segment-meta">
-                <span
-                  className="speaker-chip"
+                <select
+                  className="speaker-chip speaker-chip-select"
                   style={{ backgroundColor: speaker?.color ?? '#888' }}
+                  value={segment.speakerId}
+                  disabled={segment.interim}
+                  onChange={(e) => changeSegmentSpeaker(segment.id, e.target.value)}
+                  aria-label="Change speaker for this passage"
+                  title="Wrong speaker? Reassign this passage."
                 >
-                  {speaker?.name ?? '…'}
-                </span>
+                  {segment.speakerId === -1 && <option value={-1}>…</option>}
+                  {speakers.map((sp) => (
+                    <option key={sp.id} value={sp.id}>
+                      {sp.name}
+                    </option>
+                  ))}
+                  <option value="new">+ New speaker</option>
+                </select>
                 <span className="segment-time">{formatTime(segment.startTime)}</span>
               </div>
               <p className="segment-text">{segment.text}</p>

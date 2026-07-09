@@ -20,7 +20,9 @@ export function SpeakerLegend() {
               onChange={(e) => renameSpeaker(speaker.id, e.target.value)}
               aria-label={`Rename ${speaker.name}`}
             />
-            <span className="speaker-pitch">~{Math.round(speaker.medianPitchHz)} Hz</span>
+            {speaker.medianPitchHz > 0 && (
+              <span className="speaker-pitch">~{Math.round(speaker.medianPitchHz)} Hz</span>
+            )}
           </li>
         ))}
       </ul>
