@@ -4,6 +4,7 @@ import { TranscriptView } from './components/TranscriptView'
 import { SuggestionsPanel } from './components/SuggestionsPanel'
 import { SpeakerLegend } from './components/SpeakerLegend'
 import { DraftsPanel } from './components/DraftsPanel'
+import { PlaybackPanel } from './components/PlaybackPanel'
 import { PowerBadge } from './components/PowerBadge'
 import { analyzeSegments } from './lib/editAnalyzer'
 import { currentDutyCycle, initPowerMonitor, runWhenIdle } from './lib/power'
@@ -61,6 +62,7 @@ export default function App() {
       <main className="layout">
         <aside className="sidebar">
           <RecorderPanel />
+          <PlaybackPanel />
           <SpeakerLegend />
           <DraftsPanel />
         </aside>

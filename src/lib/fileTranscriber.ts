@@ -81,6 +81,12 @@ export async function transcribeFile(file: File): Promise<void> {
   useVoxlyStore.getState().replaceSegments(segments)
   useVoxlyStore.getState().setFileProgress(null, null)
   useVoxlyStore.getState().setMode('idle')
+  // Keep the audio around for playback — unless this was a refine pass, where
+  // the live recording is already (re-)stored by the caller and should keep
+  // its 'live' kind so Refine stays available.
+  if (!useVoxlyStore.getState().recordingBlob) {
+    useVoxlyStore.getState().setRecordingBlob(file, 'file')
+  }
 }
 
 async function decodeToMono(file: File): Promise<{ pcm: Float32Array; duration: number }> {

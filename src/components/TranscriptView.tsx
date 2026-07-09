@@ -22,6 +22,8 @@ export function TranscriptView() {
   const setSegmentSpeaker = useVoxlyStore((s) => s.setSegmentSpeaker)
   const ensureSpeaker = useVoxlyStore((s) => s.ensureSpeaker)
   const saveDraft = useVoxlyStore((s) => s.saveDraft)
+  const recordingBlob = useVoxlyStore((s) => s.recordingBlob)
+  const requestSeek = useVoxlyStore((s) => s.requestSeek)
   const [exporting, setExporting] = useState(false)
   const [justSaved, setJustSaved] = useState(false)
 
@@ -168,7 +170,17 @@ export function TranscriptView() {
                   ))}
                   <option value="new">+ New speaker</option>
                 </select>
-                <span className="segment-time">{formatTime(segment.startTime)}</span>
+                {recordingBlob ? (
+                  <button
+                    className="segment-time segment-time-link"
+                    onClick={() => requestSeek(segment.startTime)}
+                    title="Play the audio from here"
+                  >
+                    ▸ {formatTime(segment.startTime)}
+                  </button>
+                ) : (
+                  <span className="segment-time">{formatTime(segment.startTime)}</span>
+                )}
                 {flaggedSegmentIds.has(segment.id) && (
                   <span className="segment-flag">✎ needs cleanup</span>
                 )}
