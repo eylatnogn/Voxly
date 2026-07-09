@@ -46,6 +46,9 @@ export class MicFeatureCapture {
   /** Latest RMS level (0..1) for the UI meter. */
   level = 0
 
+  /** Fired when the OS revokes the microphone (call, another app, etc.). */
+  onTrackEnded: (() => void) | null = null
+
   /** Current adaptive boost factor, for display. */
   get boost(): number {
     return this.gainNode?.gain.value ?? 1
@@ -60,7 +63,18 @@ export class MicFeatureCapture {
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     })
+    for (const track of this.stream.getAudioTracks()) {
+      track.addEventListener('ended', this.handleTrackEnded)
+    }
     this.context = new AudioContext()
+    // Mobile browsers can move the context to 'suspended'/'interrupted'
+    // (screen events, audio focus changes). Resume it — the session
+    // recording depends on this graph staying alive.
+    this.context.onstatechange = () => {
+      if (this.context && this.context.state === 'suspended') {
+        void this.context.resume()
+      }
+    }
     const source = this.context.createMediaStreamSource(this.stream)
     this.analyser = this.context.createAnalyser()
     this.analyser.fftSize = 2048
@@ -87,22 +101,25 @@ export class MicFeatureCapture {
     document.addEventListener('visibilitychange', this.onVisibility)
   }
 
+  private handleTrackEnded = () => {
+    this.onTrackEnded?.()
+  }
+
   private onVisibility = () => {
     if (!this.context) return
-    if (document.hidden) {
-      void this.context.suspend()
-      if (this.timer !== null) {
-        clearTimeout(this.timer)
-        this.timer = null
-      }
-    } else {
+    // The audio graph must NOT be suspended while hidden — the session
+    // recording flows through it, and suspending silently killed recordings
+    // whenever the tab was backgrounded or the screen locked. Instead the
+    // analysis duty cycle drops to a 1 fps trickle (scheduleNext reads
+    // document.hidden), which keeps battery cost negligible.
+    if (!document.hidden) {
       void this.context.resume()
-      this.scheduleNext()
+      if (this.timer === null) this.scheduleNext()
     }
   }
 
   private scheduleNext(): void {
-    const fps = currentDutyCycle().analysisFps
+    const fps = document.hidden ? 1 : currentDutyCycle().analysisFps
     this.timer = window.setTimeout(() => {
       this.captureFrame()
       if (this.context) this.scheduleNext()
@@ -151,7 +168,10 @@ export class MicFeatureCapture {
     document.removeEventListener('visibilitychange', this.onVisibility)
     if (this.timer !== null) clearTimeout(this.timer)
     this.timer = null
-    this.stream?.getTracks().forEach((t) => t.stop())
+    this.stream?.getTracks().forEach((t) => {
+      t.removeEventListener('ended', this.handleTrackEnded)
+      t.stop()
+    })
     void this.context?.close()
     this.context = null
     this.stream = null
