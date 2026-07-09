@@ -69,6 +69,7 @@ export class LiveTranscriber {
   private recognitionDead = false
   private recorder: MediaRecorder | null = null
   private recordedChunks: Blob[] = []
+  private wakeLock: { release: () => Promise<void> } | null = null
 
   get micLevel(): number {
     return this.mic.level
@@ -84,6 +85,7 @@ export class LiveTranscriber {
     if (!Ctor) throw new Error('This browser does not support the Web Speech API. Try Chrome or Edge, or use the audio-file mode.')
 
     await this.mic.start()
+    this.mic.onTrackEnded = () => this.handleMicRevoked()
     this.tagger.reset()
     this.running = true
     this.recognitionDead = false
@@ -91,6 +93,11 @@ export class LiveTranscriber {
     this.lastVoiceAt = performance.now()
     this.currentSegmentStart = 0
     this.startRecorder()
+    // Keep the screen (and therefore the mic + recognizer) alive during the
+    // session — phones suspending the page mid-meeting was a top cause of
+    // recordings stopping "randomly". Released on stop.
+    void this.acquireWakeLock()
+    document.addEventListener('visibilitychange', this.onVisibility)
 
     const recognition = new Ctor()
     recognition.lang = lang
@@ -251,11 +258,19 @@ export class LiveTranscriber {
     if (!stream || typeof MediaRecorder === 'undefined') return
     try {
       this.recordedChunks = []
-      this.recorder = new MediaRecorder(stream)
-      this.recorder.ondataavailable = (event) => {
+      const recorder = new MediaRecorder(stream)
+      recorder.ondataavailable = (event) => {
         if (event.data.size > 0) this.recordedChunks.push(event.data)
       }
-      this.recorder.start(10000) // flush a chunk every 10 s
+      // Finalize on ANY stop — including the recorder dying because the OS
+      // revoked the mic — so captured audio is never lost.
+      recorder.onstop = () => {
+        const blob = new Blob(this.recordedChunks, { type: recorder.mimeType || 'audio/webm' })
+        this.recordedChunks = []
+        if (blob.size > 0) useVoxlyStore.getState().setRecordingBlob(blob)
+      }
+      recorder.start(10000) // flush a chunk every 10 s
+      this.recorder = recorder
     } catch {
       this.recorder = null
     }
@@ -265,16 +280,43 @@ export class LiveTranscriber {
     const recorder = this.recorder
     this.recorder = null
     if (!recorder || recorder.state === 'inactive') return
-    recorder.onstop = () => {
-      const blob = new Blob(this.recordedChunks, { type: recorder.mimeType || 'audio/webm' })
-      this.recordedChunks = []
-      if (blob.size > 0) useVoxlyStore.getState().setRecordingBlob(blob)
-    }
     recorder.stop()
+  }
+
+  private async acquireWakeLock(): Promise<void> {
+    const nav = navigator as Navigator & {
+      wakeLock?: { request: (type: 'screen') => Promise<{ release: () => Promise<void> }> }
+    }
+    if (!nav.wakeLock) return
+    try {
+      this.wakeLock = await nav.wakeLock.request('screen')
+    } catch {
+      // Denied (low battery mode, etc.) — recording still works while the
+      // page stays in the foreground.
+    }
+  }
+
+  private onVisibility = () => {
+    // Wake locks auto-release when the page is hidden; re-arm on return.
+    if (!document.hidden && this.running) void this.acquireWakeLock()
+  }
+
+  /** The OS revoked the microphone (phone call, another app grabbed it). */
+  private handleMicRevoked(): void {
+    if (!this.running) return
+    this.stop()
+    const store = useVoxlyStore.getState()
+    store.setMode('idle')
+    store.setError(
+      'The system took the microphone (a call or another app). Recording stopped — everything captured so far is kept: tap "✨ Refine transcript" to transcribe it.',
+    )
   }
 
   stop(): void {
     this.running = false
+    document.removeEventListener('visibilitychange', this.onVisibility)
+    void this.wakeLock?.release().catch(() => {})
+    this.wakeLock = null
     if (this.watchdog !== null) {
       clearInterval(this.watchdog)
       this.watchdog = null
@@ -285,6 +327,7 @@ export class LiveTranscriber {
     // transcript, not the bin.
     this.promoteInterim()
     this.stopRecorder()
+    this.mic.onTrackEnded = null
     this.mic.stop()
     this.removeInterim()
   }
