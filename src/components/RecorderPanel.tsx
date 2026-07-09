@@ -38,17 +38,10 @@ export function RecorderPanel() {
   const transcriberRef = useRef<LiveTranscriber | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [micLevel, setMicLevel] = useState(0)
+  const [micBoost, setMicBoost] = useState(1)
   const [lang, setLang] = useState(defaultLanguage)
-  const [highSensitivity, setHighSensitivity] = useState(
-    () => localStorage.getItem('voxly-mic-sens') === 'high',
-  )
   const [elapsed, setElapsed] = useState(0)
   const liveSupported = isLiveTranscriptionSupported()
-
-  const changeSensitivity = (high: boolean) => {
-    setHighSensitivity(high)
-    localStorage.setItem('voxly-mic-sens', high ? 'high' : 'standard')
-  }
 
   // Session clock — one tick per second, only while recording.
   useEffect(() => {
@@ -79,6 +72,7 @@ export function RecorderPanel() {
     if (interval === 0) return
     const timer = window.setInterval(() => {
       setMicLevel(transcriberRef.current?.micLevel ?? 0)
+      setMicBoost(transcriberRef.current?.micBoost ?? 1)
     }, interval)
     return () => clearInterval(timer)
   }, [mode])
@@ -87,7 +81,7 @@ export function RecorderPanel() {
     clearSession()
     const transcriber = new LiveTranscriber()
     try {
-      await transcriber.start(lang, highSensitivity)
+      await transcriber.start(lang)
       transcriberRef.current = transcriber
       setMode('live')
     } catch (error) {
@@ -137,19 +131,6 @@ export function RecorderPanel() {
         </select>
       </label>
 
-      <label className="lang-row">
-        <span>Mic pickup</span>
-        <select
-          value={highSensitivity ? 'high' : 'standard'}
-          onChange={(e) => changeSensitivity(e.target.value === 'high')}
-          disabled={mode !== 'idle'}
-          title="High pickup amplifies the mic 4× for speaker analysis and the refine recording — best for a phone on the meeting-room table. Live captions are unaffected; use Refine after stopping for the full benefit."
-        >
-          <option value="standard">Standard (close-up)</option>
-          <option value="high">High (room / distance)</option>
-        </select>
-      </label>
-
       {mode === 'live' ? (
         <button className="btn btn-stop" onClick={stopLive}>
           ■ Stop recording
@@ -169,6 +150,12 @@ export function RecorderPanel() {
           Live dictation needs Chrome or Edge. Audio-file transcription works everywhere.
         </p>
       )}
+      {mode !== 'live' && (
+        <p className="hint">
+          Mic sensitivity adjusts automatically — quiet or distant voices are boosted, close
+          voices are leveled.
+        </p>
+      )}
 
       {mode === 'live' && (
         <>
@@ -177,6 +164,14 @@ export function RecorderPanel() {
             <span>
               Recording · {Math.floor(elapsed / 60)}:{(elapsed % 60).toString().padStart(2, '0')}
             </span>
+            {micBoost > 1.2 && (
+              <span
+                className="boost-badge"
+                title="Auto mic boost — the room is quiet, so the signal is being amplified for speaker analysis and the refine recording"
+              >
+                ×{micBoost.toFixed(1)} boost
+              </span>
+            )}
           </div>
           <div className="mic-meter" aria-hidden="true">
             <div className="mic-meter-fill" style={{ width: `${Math.round(micLevel * 100)}%` }} />
