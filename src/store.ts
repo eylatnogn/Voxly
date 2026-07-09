@@ -36,6 +36,10 @@ interface VoxlyState {
   error: string | null
   /** Audio captured during the last live session, for the refine pass. */
   recordingBlob: Blob | null
+  /** Where the audio came from — refine only makes sense for live captures. */
+  audioKind: 'live' | 'file' | null
+  /** Playback position (seconds) requested by clicking a transcript timestamp. */
+  seekRequest: number | null
   drafts: Draft[]
 
   setMode: (mode: SessionMode) => void
@@ -54,7 +58,8 @@ interface VoxlyState {
   dismissSuggestion: (suggestionId: string) => void
   setPower: (patch: Partial<PowerState>) => void
   setFileProgress: (progress: number | null, status?: string | null) => void
-  setRecordingBlob: (blob: Blob | null) => void
+  setRecordingBlob: (blob: Blob | null, kind?: 'live' | 'file') => void
+  requestSeek: (seconds: number | null) => void
   saveDraft: () => void
   loadDraft: (id: string) => void
   deleteDraft: (id: string) => void
@@ -71,6 +76,8 @@ export const useVoxlyStore = create<VoxlyState>((set) => ({
   fileStatus: null,
   error: null,
   recordingBlob: null,
+  audioKind: null,
+  seekRequest: null,
   drafts: readDrafts(),
 
   setMode: (mode) => set({ mode }),
@@ -96,6 +103,8 @@ export const useVoxlyStore = create<VoxlyState>((set) => ({
       fileStatus: null,
       error: null,
       recordingBlob: null,
+      audioKind: null,
+      seekRequest: null,
     }),
 
   ensureSpeaker: (id, medianPitchHz) =>
@@ -178,7 +187,10 @@ export const useVoxlyStore = create<VoxlyState>((set) => ({
       fileStatus: status === undefined ? state.fileStatus : status,
     })),
 
-  setRecordingBlob: (blob) => set({ recordingBlob: blob }),
+  setRecordingBlob: (blob, kind) =>
+    set({ recordingBlob: blob, audioKind: blob ? (kind ?? 'live') : null }),
+
+  requestSeek: (seconds) => set({ seekRequest: seconds }),
 
   saveDraft: () =>
     set((state) => {
@@ -208,6 +220,8 @@ export const useVoxlyStore = create<VoxlyState>((set) => ({
         suggestions: [],
         mode: 'idle',
         recordingBlob: null,
+        audioKind: null,
+        seekRequest: null,
         error: null,
         fileProgress: null,
         fileStatus: null,

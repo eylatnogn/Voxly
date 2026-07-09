@@ -484,6 +484,36 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+.segment-time-link {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.segment-time-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.playback-panel .audio-player {
+  width: 100%;
+  height: 40px;
+}
+
+.playback-actions {
+  margin-top: 0.6rem;
+}
+
+.playback-actions .btn {
+  display: inline-block;
+  width: auto;
+  font-size: 0.82rem;
+  padding: 0.35rem 0.7rem;
+  text-decoration: none;
+}
+
 .segment-flag {
   margin-left: auto;
   font-size: 0.7rem;

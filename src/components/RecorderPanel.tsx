@@ -35,6 +35,7 @@ export function RecorderPanel() {
   const segments = useVoxlyStore((s) => s.segments)
 
   const recordingBlob = useVoxlyStore((s) => s.recordingBlob)
+  const audioKind = useVoxlyStore((s) => s.audioKind)
   const transcriberRef = useRef<LiveTranscriber | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [micLevel, setMicLevel] = useState(0)
@@ -49,6 +50,7 @@ export function RecorderPanel() {
     if (
       mode === 'idle' &&
       recordingBlob &&
+      audioKind === 'live' &&
       segments.filter((s) => !s.interim).length === 0
     ) {
       setError(
@@ -124,7 +126,7 @@ export function RecorderPanel() {
     void transcribeFile(file)
     // transcribeFile clears the session; keep the recording so refine can be
     // re-run (e.g. after a model-download failure).
-    useVoxlyStore.getState().setRecordingBlob(recordingBlob)
+    useVoxlyStore.getState().setRecordingBlob(recordingBlob, 'live')
   }
 
   return (
@@ -225,7 +227,7 @@ export function RecorderPanel() {
         </div>
       )}
 
-      {recordingBlob && mode === 'idle' && (
+      {recordingBlob && audioKind === 'live' && mode === 'idle' && (
         <>
           <button className="btn btn-refine" onClick={refine}>
             ✨ Refine transcript
