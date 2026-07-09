@@ -57,6 +57,8 @@ export class LiveTranscriber {
   private lastSpeakerId = -1
   private lastActivityAt = 0
   private watchdog: number | null = null
+  private recorder: MediaRecorder | null = null
+  private recordedChunks: Blob[] = []
 
   get micLevel(): number {
     return this.mic.level
@@ -70,6 +72,7 @@ export class LiveTranscriber {
     this.tagger.reset()
     this.running = true
     this.currentSegmentStart = 0
+    this.startRecorder()
 
     const recognition = new Ctor()
     recognition.lang = lang
@@ -182,6 +185,40 @@ export class LiveTranscriber {
     store.replaceSegments(store.segments.filter((s) => s.id !== 'live-interim'))
   }
 
+  /**
+   * Record the session audio alongside live recognition (the browser's
+   * hardware Opus encoder makes this nearly free). After the session, the
+   * recording can be re-transcribed with the on-device Whisper model — far
+   * more accurate than the live recognizer, and with word-level speaker
+   * tagging.
+   */
+  private startRecorder(): void {
+    const stream = this.mic.mediaStream
+    if (!stream || typeof MediaRecorder === 'undefined') return
+    try {
+      this.recordedChunks = []
+      this.recorder = new MediaRecorder(stream)
+      this.recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) this.recordedChunks.push(event.data)
+      }
+      this.recorder.start(10000) // flush a chunk every 10 s
+    } catch {
+      this.recorder = null
+    }
+  }
+
+  private stopRecorder(): void {
+    const recorder = this.recorder
+    this.recorder = null
+    if (!recorder || recorder.state === 'inactive') return
+    recorder.onstop = () => {
+      const blob = new Blob(this.recordedChunks, { type: recorder.mimeType || 'audio/webm' })
+      this.recordedChunks = []
+      if (blob.size > 0) useVoxlyStore.getState().setRecordingBlob(blob)
+    }
+    recorder.stop()
+  }
+
   stop(): void {
     this.running = false
     if (this.watchdog !== null) {
@@ -190,6 +227,7 @@ export class LiveTranscriber {
     }
     this.recognition?.stop()
     this.recognition = null
+    this.stopRecorder()
     this.mic.stop()
     this.removeInterim()
   }

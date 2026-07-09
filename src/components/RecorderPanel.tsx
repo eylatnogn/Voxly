@@ -4,6 +4,27 @@ import { transcribeFile } from '../lib/fileTranscriber'
 import { currentDutyCycle } from '../lib/power'
 import { useVoxlyStore } from '../store'
 
+const LANGUAGES: Array<[code: string, label: string]> = [
+  ['en-US', 'English (US)'],
+  ['en-GB', 'English (UK)'],
+  ['es-ES', 'Español'],
+  ['fr-FR', 'Français'],
+  ['de-DE', 'Deutsch'],
+  ['it-IT', 'Italiano'],
+  ['pt-BR', 'Português (BR)'],
+  ['zh-CN', '中文'],
+  ['ja-JP', '日本語'],
+  ['ko-KR', '한국어'],
+  ['hi-IN', 'हिन्दी'],
+]
+
+function defaultLanguage(): string {
+  const stored = localStorage.getItem('voxly-lang')
+  if (stored) return stored
+  const nav = navigator.language || 'en-US'
+  return LANGUAGES.some(([code]) => code === nav) ? nav : 'en-US'
+}
+
 export function RecorderPanel() {
   const mode = useVoxlyStore((s) => s.mode)
   const setMode = useVoxlyStore((s) => s.setMode)
@@ -13,10 +34,17 @@ export function RecorderPanel() {
   const fileStatus = useVoxlyStore((s) => s.fileStatus)
   const segments = useVoxlyStore((s) => s.segments)
 
+  const recordingBlob = useVoxlyStore((s) => s.recordingBlob)
   const transcriberRef = useRef<LiveTranscriber | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [micLevel, setMicLevel] = useState(0)
+  const [lang, setLang] = useState(defaultLanguage)
   const liveSupported = isLiveTranscriptionSupported()
+
+  const changeLang = (code: string) => {
+    setLang(code)
+    localStorage.setItem('voxly-lang', code)
+  }
 
   // Poll the mic level for the meter — only while recording, at the interval
   // the power profile allows (0 = meter disabled in saver mode).
@@ -37,7 +65,7 @@ export function RecorderPanel() {
     clearSession()
     const transcriber = new LiveTranscriber()
     try {
-      await transcriber.start(navigator.language || 'en-US')
+      await transcriber.start(lang)
       transcriberRef.current = transcriber
       setMode('live')
     } catch (error) {
@@ -57,9 +85,35 @@ export function RecorderPanel() {
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
+  const refine = () => {
+    if (!recordingBlob) return
+    const file = new File([recordingBlob], 'meeting-recording.webm', {
+      type: recordingBlob.type || 'audio/webm',
+    })
+    void transcribeFile(file)
+    // transcribeFile clears the session; keep the recording so refine can be
+    // re-run (e.g. after a model-download failure).
+    useVoxlyStore.getState().setRecordingBlob(recordingBlob)
+  }
+
   return (
     <div className="panel recorder-panel">
       <h2>Capture</h2>
+
+      <label className="lang-row">
+        <span>Language</span>
+        <select
+          value={lang}
+          onChange={(e) => changeLang(e.target.value)}
+          disabled={mode !== 'idle'}
+        >
+          {LANGUAGES.map(([code, label]) => (
+            <option key={code} value={code}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </label>
 
       {mode === 'live' ? (
         <button className="btn btn-stop" onClick={stopLive}>
@@ -116,6 +170,19 @@ export function RecorderPanel() {
             </div>
           )}
         </div>
+      )}
+
+      {recordingBlob && mode === 'idle' && (
+        <>
+          <button className="btn btn-refine" onClick={refine}>
+            ✨ Refine transcript
+          </button>
+          <p className="hint">
+            Re-transcribes the captured recording with the on-device Whisper model — catches
+            words the live recognizer missed and tags speakers word-by-word. (English works
+            best; runs locally.)
+          </p>
+        </>
       )}
 
       {segments.length > 0 && mode === 'idle' && (

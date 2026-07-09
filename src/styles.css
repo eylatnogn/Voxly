@@ -178,6 +178,35 @@ body {
   border-color: #2d4266;
 }
 
+.btn-refine {
+  margin-top: 0.75rem;
+  background: #1f3327;
+  border-color: var(--ok);
+  color: #7fe0ae;
+  font-weight: 600;
+}
+
+.lang-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.lang-row select {
+  flex: 1;
+  min-width: 0;
+  padding: 0.35rem 0.5rem;
+  border-radius: 8px;
+  border: 1px solid var(--panel-border);
+  background: #0c0f14;
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
 .btn-ghost {
   background: transparent;
   color: var(--text-dim);

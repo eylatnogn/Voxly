@@ -27,6 +27,8 @@ interface VoxlyState {
   fileProgress: number | null
   fileStatus: string | null
   error: string | null
+  /** Audio captured during the last live session, for the refine pass. */
+  recordingBlob: Blob | null
 
   setMode: (mode: SessionMode) => void
   setError: (error: string | null) => void
@@ -42,6 +44,7 @@ interface VoxlyState {
   dismissSuggestion: (suggestionId: string) => void
   setPower: (patch: Partial<PowerState>) => void
   setFileProgress: (progress: number | null, status?: string | null) => void
+  setRecordingBlob: (blob: Blob | null) => void
 }
 
 export const useVoxlyStore = create<VoxlyState>((set) => ({
@@ -53,6 +56,7 @@ export const useVoxlyStore = create<VoxlyState>((set) => ({
   fileProgress: null,
   fileStatus: null,
   error: null,
+  recordingBlob: null,
 
   setMode: (mode) => set({ mode }),
   setError: (error) => set({ error }),
@@ -69,7 +73,15 @@ export const useVoxlyStore = create<VoxlyState>((set) => ({
   replaceSegments: (segments) => set({ segments }),
 
   clearSession: () =>
-    set({ segments: [], speakers: [], suggestions: [], fileProgress: null, fileStatus: null, error: null }),
+    set({
+      segments: [],
+      speakers: [],
+      suggestions: [],
+      fileProgress: null,
+      fileStatus: null,
+      error: null,
+      recordingBlob: null,
+    }),
 
   ensureSpeaker: (id, medianPitchHz) =>
     set((state) => {
@@ -143,4 +155,6 @@ export const useVoxlyStore = create<VoxlyState>((set) => ({
       fileProgress: progress,
       fileStatus: status === undefined ? state.fileStatus : status,
     })),
+
+  setRecordingBlob: (blob) => set({ recordingBlob: blob }),
 }))

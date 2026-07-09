@@ -22,9 +22,14 @@ export class MicFeatureCapture {
   /** Latest RMS level (0..1) for the UI meter. */
   level = 0
 
+  /** The live microphone stream, shared with the session recorder. */
+  get mediaStream(): MediaStream | null {
+    return this.stream
+  }
+
   async start(): Promise<void> {
     this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true },
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     })
     this.context = new AudioContext()
     const source = this.context.createMediaStreamSource(this.stream)

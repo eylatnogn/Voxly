@@ -37,12 +37,19 @@ interface Cluster {
 
 const MAX_SPEAKERS = 8
 /**
- * Distance in log-feature space below which an utterance joins a cluster.
- * 0.35 ≈ a 40% pitch difference — generous enough for one voice's natural
- * range, while typical male/female medians (~110 vs ~210 Hz, log gap ~0.65)
- * stay clearly apart.
+ * Distance in log-feature space below which an utterance confidently joins a
+ * cluster (and refines it). 0.35 ≈ a 40% pitch difference — generous enough
+ * for one voice's natural range.
  */
 const MATCH_RADIUS = 0.35
+/**
+ * A NEW speaker is only created beyond this distance (~70% pitch difference,
+ * roughly a typical male/female gap). Utterances landing between the two
+ * radii are assigned to the nearest speaker without refining it — better to
+ * occasionally lump two similar voices than to keep minting phantom speakers
+ * from one person's expressive range.
+ */
+const NEW_SPEAKER_RADIUS = 0.55
 /** Two clusters closer than this are the same voice that got split — merge. */
 const MERGE_RADIUS = 0.25
 /** Centroid (timbre) is ~10× noisier than pitch, so it only nudges distance. */
@@ -79,10 +86,12 @@ export class SpeakerTagger {
     }
 
     let assigned: Cluster
-    if (best && (bestDist <= MATCH_RADIUS || this.clusters.length >= MAX_SPEAKERS)) {
-      // Within radius — or over the cap, where the nearest cluster beats
-      // inventing implausible extra speakers.
+    if (best && bestDist <= MATCH_RADIUS) {
       updateCluster(best, logPitch, logCentroid, pitch)
+      assigned = best
+    } else if (best && (bestDist <= NEW_SPEAKER_RADIUS || this.clusters.length >= MAX_SPEAKERS)) {
+      // Borderline (or over the speaker cap): nearest speaker, but don't let
+      // the ambiguous evidence drag the cluster around.
       assigned = best
     } else {
       assigned = {
