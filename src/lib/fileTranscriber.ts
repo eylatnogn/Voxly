@@ -1,8 +1,10 @@
 import {
   buildVoicedRegions,
   chunksToSegments,
+  clusterEmbeddings,
   wordsToSegments,
   type TimedWord,
+  type VoicedRegion,
 } from './diarization'
 import { analyzeFrame, type VoiceFrame } from './pitch'
 import { SpeakerTagger } from './speakerTagger'
@@ -49,20 +51,51 @@ export async function transcribeFile(file: File): Promise<void> {
     return
   }
 
-  const result = await runWhisper(pcm)
-  if (!result) return // error already surfaced
+  const worker = new Worker(new URL('../workers/whisperWorker.ts', import.meta.url), {
+    type: 'module',
+  })
+  const result = await runWhisper(worker, pcm)
+  if (!result) return // error already surfaced (worker terminated there)
 
   useVoxlyStore.getState().setFileProgress(null, 'Identifying speakers…')
 
-  // Voice features over the whole recording, grouped into voiced regions and
-  // clustered into speakers.
+  // Voice features over the whole recording, grouped into voiced regions.
+  // Pitch clustering provides speaker ids as the fallback…
   const frames = extractFrames(pcm, WHISPER_SAMPLE_RATE, 0, duration)
   const tagger = new SpeakerTagger()
   const regions = buildVoicedRegions(frames, tagger)
+
+  // …and neural voice fingerprints override them when available: an x-vector
+  // embedding per region, clustered by cosine similarity — far more accurate
+  // between genuinely different voices than pitch alone.
+  const vectors = await runEmbeddings(worker, pcm, regions)
+  worker.terminate()
+  if (vectors) {
+    const clusterIds = clusterEmbeddings(vectors)
+    let lastId = -1
+    for (let i = 0; i < regions.length; i++) {
+      if (clusterIds[i] >= 0) {
+        regions[i].speakerId = clusterIds[i]
+        lastId = clusterIds[i]
+      } else {
+        // Region too short to fingerprint — assume the surrounding speaker.
+        regions[i].speakerId = lastId
+      }
+    }
+  }
+
+  // Register speakers with a representative pitch hint per cluster.
+  const pitchByCluster = new Map<number, number[]>()
   for (const region of regions) {
     if (region.speakerId >= 0 && region.medianPitchHz > 0) {
-      useVoxlyStore.getState().ensureSpeaker(region.speakerId, region.medianPitchHz)
+      const list = pitchByCluster.get(region.speakerId) ?? []
+      list.push(region.medianPitchHz)
+      pitchByCluster.set(region.speakerId, list)
     }
+  }
+  for (const [speakerId, pitches] of pitchByCluster) {
+    const sorted = pitches.slice().sort((a, b) => a - b)
+    useVoxlyStore.getState().ensureSpeaker(speakerId, sorted[Math.floor(sorted.length / 2)])
   }
 
   const timed = result.chunks
@@ -129,11 +162,8 @@ function normalizeQuietAudio(pcm: Float32Array): void {
   for (let i = 0; i < pcm.length; i++) pcm[i] *= gain
 }
 
-function runWhisper(pcm: Float32Array): Promise<WhisperResult | null> {
+function runWhisper(worker: Worker, pcm: Float32Array): Promise<WhisperResult | null> {
   return new Promise((resolve) => {
-    const worker = new Worker(new URL('../workers/whisperWorker.ts', import.meta.url), {
-      type: 'module',
-    })
     const store = useVoxlyStore.getState()
 
     worker.onmessage = (event: MessageEvent) => {
@@ -150,7 +180,6 @@ function runWhisper(pcm: Float32Array): Promise<WhisperResult | null> {
           store.setFileProgress(msg.progress)
           break
         case 'result':
-          worker.terminate()
           resolve({ chunks: msg.chunks, granularity: msg.granularity })
           break
         case 'error':
@@ -174,6 +203,63 @@ function runWhisper(pcm: Float32Array): Promise<WhisperResult | null> {
     // speaker-feature extraction after transcription completes.
     const audio = pcm.slice()
     worker.postMessage({ type: 'transcribe', audio }, [audio.buffer])
+  })
+}
+
+/**
+ * Fingerprint the voiced regions with the speaker-verification model. Long
+ * meetings are capped at the 150 longest regions (shorter ones inherit their
+ * neighbor's speaker) to bound inference time. Returns null when the model
+ * can't load — pitch clustering remains in effect.
+ */
+function runEmbeddings(
+  worker: Worker,
+  pcm: Float32Array,
+  regions: VoicedRegion[],
+): Promise<Array<number[] | null> | null> {
+  const eligible = regions
+    .map((region, index) => ({ index, start: region.start, end: region.end }))
+    .filter((r) => r.end - r.start >= 0.8)
+  if (eligible.length === 0) return Promise.resolve(null)
+  const capped = eligible
+    .slice()
+    .sort((a, b) => b.end - b.start - (a.end - a.start))
+    .slice(0, 150)
+    .sort((a, b) => a.index - b.index)
+
+  return new Promise((resolve) => {
+    const timeout = window.setTimeout(() => resolve(null), 180000)
+    worker.onmessage = (event: MessageEvent) => {
+      const msg = event.data as
+        | { type: 'status'; message: string }
+        | { type: 'progress'; progress: number }
+        | { type: 'embeddings'; vectors: Array<{ index: number; vector: number[] }> }
+        | { type: 'error'; message: string }
+      switch (msg.type) {
+        case 'progress':
+          useVoxlyStore.getState().setFileProgress(msg.progress, 'Fingerprinting voices…')
+          break
+        case 'embeddings': {
+          clearTimeout(timeout)
+          const vectors: Array<number[] | null> = regions.map(() => null)
+          for (const { index, vector } of msg.vectors) vectors[index] = vector
+          resolve(vectors)
+          break
+        }
+        case 'error':
+          clearTimeout(timeout)
+          resolve(null)
+          break
+        default:
+          break
+      }
+    }
+    worker.onerror = () => {
+      clearTimeout(timeout)
+      resolve(null)
+    }
+    const audio = pcm.slice()
+    worker.postMessage({ type: 'embed', audio, regions: capped }, [audio.buffer])
   })
 }
 

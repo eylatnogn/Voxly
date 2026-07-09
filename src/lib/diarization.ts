@@ -212,6 +212,87 @@ function absorbSingleWordFlips(ids: number[]): void {
 }
 
 /**
+ * Cluster neural voice fingerprints (x-vector embeddings) into speakers via
+ * average-linkage agglomerative clustering on cosine similarity. Embeddings
+ * capture timbre/resonance/speaking style — far more discriminative between
+ * different voices than the pitch heuristic, which stays as the live tagger
+ * and as fallback when the embedding model is unavailable.
+ *
+ * @param vectors one entry per region; null where no fingerprint could be
+ * computed (region too short). Returns a cluster id per region, -1 for
+ * fingerprint-less regions (caller inherits the previous region's speaker).
+ */
+export function clusterEmbeddings(
+  vectors: Array<number[] | null>,
+  similarityThreshold = 0.6,
+  maxSpeakers = 8,
+): number[] {
+  interface Cluster {
+    indices: number[]
+    centroid: number[]
+  }
+  const clusters: Cluster[] = []
+  vectors.forEach((vector, index) => {
+    if (vector && vector.length > 0) {
+      clusters.push({ indices: [index], centroid: normalize(vector) })
+    }
+  })
+
+  const mergeClosest = (minSimilarity: number): boolean => {
+    let bestA = -1
+    let bestB = -1
+    let bestSim = minSimilarity
+    for (let a = 0; a < clusters.length; a++) {
+      for (let b = a + 1; b < clusters.length; b++) {
+        const sim = dot(clusters[a].centroid, clusters[b].centroid)
+        if (sim >= bestSim) {
+          bestSim = sim
+          bestA = a
+          bestB = b
+        }
+      }
+    }
+    if (bestA === -1) return false
+    const [a, b] = [clusters[bestA], clusters[bestB]]
+    const total = a.indices.length + b.indices.length
+    const merged = a.centroid.map(
+      (v, i) => (v * a.indices.length + b.centroid[i] * b.indices.length) / total,
+    )
+    a.centroid = normalize(merged)
+    a.indices = a.indices.concat(b.indices)
+    clusters.splice(bestB, 1)
+    return true
+  }
+
+  while (clusters.length > 1 && mergeClosest(similarityThreshold)) {
+    /* merge until no pair is similar enough */
+  }
+  // Over the cap, keep merging the closest pairs regardless of threshold.
+  while (clusters.length > maxSpeakers && mergeClosest(-1)) {
+    /* forced merges */
+  }
+
+  // Stable ids ordered by each cluster's first appearance in the audio.
+  clusters.sort((a, b) => Math.min(...a.indices) - Math.min(...b.indices))
+  const ids = new Array<number>(vectors.length).fill(-1)
+  clusters.forEach((cluster, clusterId) => {
+    for (const index of cluster.indices) ids[index] = clusterId
+  })
+  return ids
+}
+
+function normalize(vector: number[]): number[] {
+  const norm = Math.sqrt(vector.reduce((sum, v) => sum + v * v, 0)) || 1
+  return vector.map((v) => v / norm)
+}
+
+function dot(a: number[], b: number[]): number {
+  let sum = 0
+  for (let i = 0; i < a.length; i++) sum += a[i] * b[i]
+  return sum
+}
+
+/**
  * Fallback path when word timestamps are unavailable: attribute each whole
  * chunk to the speaker with the most voiced-region overlap, then merge
  * adjacent chunks from the same speaker.
