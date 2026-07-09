@@ -216,6 +216,11 @@ body {
   width: auto;
 }
 
+.export-buttons {
+  display: flex;
+  gap: 0.25rem;
+}
+
 .transcript-scroll {
   max-height: calc(100vh - 190px);
   overflow-y: auto;

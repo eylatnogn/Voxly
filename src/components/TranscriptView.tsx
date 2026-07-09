@@ -1,4 +1,10 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
+import {
+  downloadBlob,
+  transcriptToDocx,
+  transcriptToSrt,
+  transcriptToTxt,
+} from '../lib/exporters'
 import { useVoxlyStore } from '../store'
 import type { Speaker } from '../types'
 
@@ -12,6 +18,8 @@ export function TranscriptView() {
   const segments = useVoxlyStore((s) => s.segments)
   const speakers = useVoxlyStore((s) => s.speakers)
   const suggestions = useVoxlyStore((s) => s.suggestions)
+  const setError = useVoxlyStore((s) => s.setError)
+  const [exporting, setExporting] = useState(false)
 
   const speakerById = useMemo(() => {
     const map = new Map<number, Speaker>()
@@ -24,21 +32,29 @@ export function TranscriptView() {
     [suggestions],
   )
 
-  const exportTranscript = () => {
-    const lines = segments
-      .filter((s) => !s.interim)
-      .map((s) => {
-        const speaker = speakerById.get(s.speakerId)
-        const name = speaker ? speaker.name : 'Unknown speaker'
-        return `[${formatTime(s.startTime)}] ${name}: ${s.text}`
-      })
-    const blob = new Blob([lines.join('\n\n')], { type: 'text/plain' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'voxly-transcript.txt'
-    a.click()
-    URL.revokeObjectURL(url)
+  const exportTxt = () => {
+    downloadBlob(
+      new Blob([transcriptToTxt(segments, speakers)], { type: 'text/plain' }),
+      'voxly-transcript.txt',
+    )
+  }
+
+  const exportSrt = () => {
+    downloadBlob(
+      new Blob([transcriptToSrt(segments, speakers)], { type: 'application/x-subrip' }),
+      'voxly-transcript.srt',
+    )
+  }
+
+  const exportDocx = async () => {
+    setExporting(true)
+    try {
+      downloadBlob(await transcriptToDocx(segments, speakers), 'voxly-transcript.docx')
+    } catch {
+      setError('Word export failed — the exporter module could not be loaded.')
+    } finally {
+      setExporting(false)
+    }
   }
 
   if (segments.length === 0) {
@@ -57,9 +73,13 @@ export function TranscriptView() {
     <div className="panel transcript-view">
       <div className="transcript-header">
         <h2>Transcript</h2>
-        <button className="btn btn-ghost" onClick={exportTranscript}>
-          ⬇ Export .txt
-        </button>
+        <div className="export-buttons">
+          <button className="btn btn-ghost" onClick={exportTxt}>⬇ .txt</button>
+          <button className="btn btn-ghost" onClick={exportSrt}>⬇ .srt</button>
+          <button className="btn btn-ghost" onClick={() => void exportDocx()} disabled={exporting}>
+            {exporting ? '…' : '⬇ Word'}
+          </button>
+        </div>
       </div>
       <div className="transcript-scroll">
         {segments.map((segment) => {

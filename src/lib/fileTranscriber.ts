@@ -1,11 +1,17 @@
+import {
+  buildVoicedRegions,
+  chunksToSegments,
+  wordsToSegments,
+  type TimedWord,
+} from './diarization'
 import { analyzeFrame, type VoiceFrame } from './pitch'
 import { SpeakerTagger } from './speakerTagger'
 import { useVoxlyStore } from '../store'
-import type { TranscriptSegment } from '../types'
 
 /**
- * Audio-file transcription: decode → Whisper (in a lazy worker) → speaker
- * tagging from pitch/tone over each timestamped chunk.
+ * Audio-file transcription: decode → Whisper (in a lazy worker) → word-level
+ * speaker diarization from pitch/tone, so speaker changes are caught even
+ * mid-sentence.
  *
  * The Whisper worker is created per job and terminated afterwards so the
  * model's memory (and any background CPU) is fully released — you only pay
@@ -17,6 +23,11 @@ const WHISPER_SAMPLE_RATE = 16000
 interface ChunkResult {
   text: string
   timestamp: [number, number | null]
+}
+
+interface WhisperResult {
+  chunks: ChunkResult[]
+  granularity: 'word' | 'chunk'
 }
 
 export async function transcribeFile(file: File): Promise<void> {
@@ -38,31 +49,36 @@ export async function transcribeFile(file: File): Promise<void> {
     return
   }
 
-  const chunks = await runWhisper(pcm)
-  if (!chunks) return // error already surfaced
+  const result = await runWhisper(pcm)
+  if (!result) return // error already surfaced
 
-  // Attribute each chunk to a speaker from its voice features.
+  useVoxlyStore.getState().setFileProgress(null, 'Identifying speakers…')
+
+  // Voice features over the whole recording, grouped into voiced regions and
+  // clustered into speakers.
+  const frames = extractFrames(pcm, WHISPER_SAMPLE_RATE, 0, duration)
   const tagger = new SpeakerTagger()
-  const segments: TranscriptSegment[] = []
-  let lastSpeakerId = -1
-  chunks.forEach((chunk, index) => {
-    const text = chunk.text.trim()
-    if (!text) return
-    const start = chunk.timestamp[0] ?? 0
-    const end = chunk.timestamp[1] ?? Math.min(start + 30, duration)
-    const frames = extractFrames(pcm, WHISPER_SAMPLE_RATE, start, end)
-    const match = tagger.classify(frames)
-    const speakerId = match ? match.speakerId : lastSpeakerId
-    if (match) {
-      useVoxlyStore.getState().ensureSpeaker(match.speakerId, match.medianPitchHz)
-      lastSpeakerId = match.speakerId
+  const regions = buildVoicedRegions(frames, tagger)
+  for (const region of regions) {
+    if (region.speakerId >= 0 && region.medianPitchHz > 0) {
+      useVoxlyStore.getState().ensureSpeaker(region.speakerId, region.medianPitchHz)
     }
-    segments.push({ id: `file-${index}`, speakerId, text, startTime: start, endTime: end })
-  })
+  }
 
-  // Merge consecutive chunks from the same speaker into readable paragraphs.
-  const merged = mergeAdjacent(segments)
-  useVoxlyStore.getState().replaceSegments(merged)
+  const timed = result.chunks
+    .map((chunk) => ({
+      text: chunk.text,
+      start: chunk.timestamp[0] ?? 0,
+      end: chunk.timestamp[1] ?? Math.min((chunk.timestamp[0] ?? 0) + 30, duration),
+    }))
+    .filter((c): c is TimedWord => c.text.trim().length > 0)
+
+  const segments =
+    result.granularity === 'word'
+      ? wordsToSegments(timed, regions)
+      : chunksToSegments(timed, regions)
+
+  useVoxlyStore.getState().replaceSegments(segments)
   useVoxlyStore.getState().setFileProgress(null, null)
   useVoxlyStore.getState().setMode('idle')
 }
@@ -88,7 +104,7 @@ async function decodeToMono(file: File): Promise<{ pcm: Float32Array; duration: 
   return { pcm: rendered.getChannelData(0), duration: decoded.duration }
 }
 
-function runWhisper(pcm: Float32Array): Promise<ChunkResult[] | null> {
+function runWhisper(pcm: Float32Array): Promise<WhisperResult | null> {
   return new Promise((resolve) => {
     const worker = new Worker(new URL('../workers/whisperWorker.ts', import.meta.url), {
       type: 'module',
@@ -99,7 +115,7 @@ function runWhisper(pcm: Float32Array): Promise<ChunkResult[] | null> {
       const msg = event.data as
         | { type: 'status'; message: string }
         | { type: 'progress'; progress: number }
-        | { type: 'result'; chunks: ChunkResult[] }
+        | { type: 'result'; chunks: ChunkResult[]; granularity: 'word' | 'chunk' }
         | { type: 'error'; message: string }
       switch (msg.type) {
         case 'status':
@@ -110,7 +126,7 @@ function runWhisper(pcm: Float32Array): Promise<ChunkResult[] | null> {
           break
         case 'result':
           worker.terminate()
-          resolve(msg.chunks)
+          resolve({ chunks: msg.chunks, granularity: msg.granularity })
           break
         case 'error':
           worker.terminate()
@@ -153,18 +169,4 @@ function extractFrames(
     if (frame) frames.push(frame)
   }
   return frames
-}
-
-function mergeAdjacent(segments: TranscriptSegment[]): TranscriptSegment[] {
-  const merged: TranscriptSegment[] = []
-  for (const segment of segments) {
-    const last = merged[merged.length - 1]
-    if (last && last.speakerId === segment.speakerId && segment.startTime - last.endTime < 2) {
-      last.text = `${last.text} ${segment.text}`.replace(/ {2,}/g, ' ')
-      last.endTime = segment.endTime
-    } else {
-      merged.push({ ...segment })
-    }
-  }
-  return merged
 }

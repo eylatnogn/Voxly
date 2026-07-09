@@ -63,18 +63,38 @@ self.onmessage = async (event: MessageEvent<TranscribeRequest>) => {
     )
 
     post({ type: 'status', message: 'Transcribing…' })
-    const output = (await transcriber(event.data.audio, {
-      chunk_length_s: 30,
-      stride_length_s: 5,
-      return_timestamps: true,
-    })) as { text: string; chunks?: ChunkResult[] }
+    // Word-level timestamps enable mid-sentence speaker changes downstream;
+    // fall back to sentence chunks if the runtime rejects word granularity.
+    let output: { text: string; chunks?: ChunkResult[] }
+    let granularity: 'word' | 'chunk' = 'word'
+    try {
+      output = (await transcriber(event.data.audio, {
+        chunk_length_s: 30,
+        stride_length_s: 5,
+        return_timestamps: 'word',
+      })) as typeof output
+    } catch {
+      granularity = 'chunk'
+      output = (await transcriber(event.data.audio, {
+        chunk_length_s: 30,
+        stride_length_s: 5,
+        return_timestamps: true,
+      })) as typeof output
+    }
 
     const chunks: ChunkResult[] =
       output.chunks && output.chunks.length > 0
         ? output.chunks
         : [{ text: output.text, timestamp: [0, null] }]
 
-    post({ type: 'result', chunks })
+    // Word chunks are short tokens; if the runtime silently returned sentence
+    // spans despite the word request, treat the result as chunk-level.
+    if (granularity === 'word' && chunks.length > 0) {
+      const avgLength = chunks.reduce((sum, c) => sum + c.text.length, 0) / chunks.length
+      if (avgLength > 20) granularity = 'chunk'
+    }
+
+    post({ type: 'result', chunks, granularity })
   } catch (error) {
     post({ type: 'error', message: error instanceof Error ? error.message : String(error) })
   }

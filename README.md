@@ -16,6 +16,10 @@ worker, with timestamps.
 utterance's fundamental frequency (pitch) and spectral centroid (tone/timbre),
 clusters them, and tags who is speaking throughout the conversation
 ("Speaker 1", "Speaker 2", …). Click any name in the Speakers panel to rename.
+For audio files, diarization is word-accurate: Whisper's word timestamps are
+matched against the voiced regions, so a speaker change in the middle of a
+sentence still produces a clean hand-off in the transcript. (Live mode tags
+per phrase — the Web Speech API doesn't expose word timings.)
 
 **✏️ Script cleanup suggestions** — The transcript is continuously analyzed
 for:
@@ -31,7 +35,11 @@ for:
 | Spacing issues | double spaces, space before punctuation |
 
 Most suggestions have a one-click **Fix**; the rest are advisory so you keep
-editorial control. Export the cleaned transcript as `.txt`.
+editorial control.
+
+**📤 Export** — download the transcript as plain text (`.txt`), subtitles
+(`.srt`, with speaker labels and timing), or a formatted Word document
+(`.docx`). The Word exporter is code-split and only loads on first use.
 
 ## Battery-first design
 
