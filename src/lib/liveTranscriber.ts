@@ -1,3 +1,4 @@
+import { GreedyCaption } from './greedyCaptions'
 import { MicFeatureCapture } from './micFeatures'
 import { SpeakerTagger } from './speakerTagger'
 import { useVoxlyStore } from '../store'
@@ -71,6 +72,7 @@ export class LiveTranscriber {
   private recognition: SpeechRecognitionLike | null = null
   private mic = new MicFeatureCapture()
   private tagger = new SpeakerTagger()
+  private greedy = new GreedyCaption()
   private running = false
   private segmentCounter = 0
   private currentSegmentStart = 0
@@ -110,6 +112,7 @@ export class LiveTranscriber {
     await this.mic.start()
     this.mic.onTrackEnded = () => this.handleMicRevoked()
     this.tagger.reset()
+    this.greedy.reset()
     this.running = true
     this.restartAttempts = 0
     this.recogFailures = 0
@@ -285,17 +288,23 @@ export class LiveTranscriber {
       if (!text) continue
 
       if (result.isFinal) {
-        this.finalizeUtterance(text)
+        // Greedy capture: if the recognizer's "corrected" final dropped words
+        // that were already on screen, keep the words we captured. Refine
+        // fixes real errors after the session.
+        this.finalizeUtterance(this.greedy.finalize(text))
       } else {
         interimText += `${text} `
       }
     }
 
     if (interimText.trim()) {
+      // Words older than the live edge are locked — later revisions can
+      // extend this text but never rewrite or retract it mid-phrase.
+      const display = this.greedy.update(interimText)
       store.upsertSegment({
         id: 'live-interim',
         speakerId: this.lastSpeakerId,
-        text: interimText.trim(),
+        text: display,
         startTime: this.currentSegmentStart,
         endTime: this.mic.elapsedSeconds(),
         interim: true,
@@ -338,6 +347,7 @@ export class LiveTranscriber {
   private promoteInterim(): void {
     const store = useVoxlyStore.getState()
     const interim = store.segments.find((s) => s.id === 'live-interim')
+    this.greedy.reset()
     if (interim?.text.trim()) this.finalizeUtterance(interim.text)
   }
 
