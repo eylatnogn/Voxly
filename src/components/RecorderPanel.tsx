@@ -39,7 +39,21 @@ export function RecorderPanel() {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [micLevel, setMicLevel] = useState(0)
   const [lang, setLang] = useState(defaultLanguage)
+  const [elapsed, setElapsed] = useState(0)
   const liveSupported = isLiveTranscriptionSupported()
+
+  // Session clock — one tick per second, only while recording.
+  useEffect(() => {
+    if (mode !== 'live') {
+      setElapsed(0)
+      return
+    }
+    const startedAt = Date.now()
+    const timer = window.setInterval(() => {
+      setElapsed(Math.floor((Date.now() - startedAt) / 1000))
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [mode])
 
   const changeLang = (code: string) => {
     setLang(code)
@@ -136,9 +150,17 @@ export function RecorderPanel() {
       )}
 
       {mode === 'live' && (
-        <div className="mic-meter" aria-hidden="true">
-          <div className="mic-meter-fill" style={{ width: `${Math.round(micLevel * 100)}%` }} />
-        </div>
+        <>
+          <div className="rec-status">
+            <span className="rec-dot" aria-hidden="true" />
+            <span>
+              Recording · {Math.floor(elapsed / 60)}:{(elapsed % 60).toString().padStart(2, '0')}
+            </span>
+          </div>
+          <div className="mic-meter" aria-hidden="true">
+            <div className="mic-meter-fill" style={{ width: `${Math.round(micLevel * 100)}%` }} />
+          </div>
+        </>
       )}
 
       <div className="divider">or</div>

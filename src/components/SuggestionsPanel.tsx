@@ -48,7 +48,20 @@ export function SuggestionsPanel() {
             : 'No cleanup suggestions — the script reads clean. ✓'}
         </p>
       ) : (
-        <ul className="suggestion-list">
+        <>
+          <div className="suggestion-summary">
+            {Object.entries(
+              suggestions.reduce<Record<string, number>>((acc, s) => {
+                acc[s.kind] = (acc[s.kind] ?? 0) + 1
+                return acc
+              }, {}),
+            ).map(([kind, count]) => (
+              <span key={kind} className="summary-chip">
+                <strong>{count}</strong> {KIND_LABELS[kind as SuggestionKind].toLowerCase()}
+              </span>
+            ))}
+          </div>
+          <ul className="suggestion-list">
           {suggestions.map((suggestion) => (
             <li key={suggestion.id} className={`suggestion suggestion-${suggestion.kind}`}>
               <div className="suggestion-top">
@@ -82,7 +95,8 @@ export function SuggestionsPanel() {
               </blockquote>
             </li>
           ))}
-        </ul>
+          </ul>
+        </>
       )}
     </div>
   )

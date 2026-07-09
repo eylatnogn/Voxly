@@ -35,11 +35,15 @@ export default function App() {
     scheduleAnalysis()
   }, [segments, scheduleAnalysis])
 
+  const mode = useVoxlyStore((s) => s.mode)
+
   return (
-    <div className="app">
+    <div className={`app${mode === 'live' ? ' app-recording' : ''}`}>
       <header className="app-header">
         <div className="brand">
-          <span className="brand-mark">▍▌▊</span>
+          <span className="brand-mark" aria-hidden="true">
+            <span /><span /><span /><span /><span />
+          </span>
           <h1>Voxly</h1>
           <span className="tagline">Meeting transcription analyzer</span>
         </div>
@@ -65,6 +69,11 @@ export default function App() {
           <SuggestionsPanel />
         </aside>
       </main>
+
+      <footer className="app-footer">
+        <span>🔒 Everything runs on this device — audio and transcripts never leave your browser.</span>
+        <span>🔋 Battery-first: analysis idles when you do.</span>
+      </footer>
     </div>
   )
 }

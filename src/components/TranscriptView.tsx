@@ -69,14 +69,45 @@ export function TranscriptView() {
     }
   }
 
+  const stats = useMemo(() => {
+    const finals = segments.filter((s) => !s.interim)
+    const words = finals.reduce((n, s) => n + s.text.split(/\s+/).filter(Boolean).length, 0)
+    const duration = finals.length > 0 ? Math.max(...finals.map((s) => s.endTime)) : 0
+    return { words, duration }
+  }, [segments])
+
   if (segments.length === 0) {
     return (
       <div className="panel transcript-empty">
         <h2>Transcript</h2>
-        <p>
-          Start a recording or drop in an audio file. Voxly will transcribe it, tag who is
-          speaking from their voice tone and pitch, and suggest edits to clean up the script.
-        </p>
+        <div className="empty-hero">
+          <span className="empty-mark" aria-hidden="true">
+            <span /><span /><span /><span /><span />
+          </span>
+          <h3>Capture the conversation, keep the meaning</h3>
+          <p>
+            Record a meeting or drop in an audio file. Voxly transcribes it on this device,
+            figures out who's speaking from their voice tone and pitch, and flags the filler
+            so your script reads clean.
+          </p>
+          <div className="empty-steps">
+            <div className="empty-step">
+              <span className="step-num">1</span>
+              <h4>Capture</h4>
+              <p>Record live, or upload a recording — wav, mp3, m4a, ogg, webm, flac.</p>
+            </div>
+            <div className="empty-step">
+              <span className="step-num">2</span>
+              <h4>Identify</h4>
+              <p>Speakers are tagged by voice. Rename them, or fix a tag right on the transcript.</p>
+            </div>
+            <div className="empty-step">
+              <span className="step-num">3</span>
+              <h4>Clean up</h4>
+              <p>One-click fixes for fillers and stumbles, then export as text, subtitles, or Word.</p>
+            </div>
+          </div>
+        </div>
       </div>
     )
   }
@@ -93,15 +124,20 @@ export function TranscriptView() {
           </button>
         </div>
       </div>
+      <div className="stats-row">
+        <span className="stat-chip"><strong>{formatTime(stats.duration)}</strong> duration</span>
+        <span className="stat-chip"><strong>{stats.words.toLocaleString()}</strong> words</span>
+        <span className="stat-chip"><strong>{speakers.length}</strong> {speakers.length === 1 ? 'speaker' : 'speakers'}</span>
+        <span className="stat-chip"><strong>{suggestions.length}</strong> {suggestions.length === 1 ? 'suggestion' : 'suggestions'}</span>
+      </div>
       <div className="transcript-scroll">
         {segments.map((segment) => {
           const speaker = speakerById.get(segment.speakerId)
           return (
             <article
               key={segment.id}
-              className={`segment${segment.interim ? ' segment-interim' : ''}${
-                flaggedSegmentIds.has(segment.id) ? ' segment-flagged' : ''
-              }`}
+              className={`segment${segment.interim ? ' segment-interim' : ''}`}
+              style={{ borderLeftColor: speaker?.color ?? 'transparent' }}
             >
               <div className="segment-meta">
                 <select
@@ -122,6 +158,9 @@ export function TranscriptView() {
                   <option value="new">+ New speaker</option>
                 </select>
                 <span className="segment-time">{formatTime(segment.startTime)}</span>
+                {flaggedSegmentIds.has(segment.id) && (
+                  <span className="segment-flag">✎ needs cleanup</span>
+                )}
               </div>
               <p className="segment-text">{segment.text}</p>
             </article>
