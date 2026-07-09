@@ -43,6 +43,21 @@ export function RecorderPanel() {
   const [elapsed, setElapsed] = useState(0)
   const liveSupported = isLiveTranscriptionSupported()
 
+  // Safety net: a session ended with a recording but zero captions means the
+  // browser's live recognizer failed — point straight at the on-device path.
+  useEffect(() => {
+    if (
+      mode === 'idle' &&
+      recordingBlob &&
+      segments.filter((s) => !s.interim).length === 0
+    ) {
+      setError(
+        'Live captions didn’t capture anything this session, but the audio was recorded. Tap "✨ Refine transcript" to transcribe it on this device.',
+      )
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, recordingBlob])
+
   // Session clock — one tick per second, only while recording.
   useEffect(() => {
     if (mode !== 'live') {

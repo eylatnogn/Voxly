@@ -43,9 +43,16 @@ export function isLiveTranscriptionSupported(): boolean {
   return getSpeechRecognition() !== null
 }
 
-/** Force a restart if the recognizer goes completely silent for this long. */
-const STALL_TIMEOUT_MS = 10000
-const WATCHDOG_INTERVAL_MS = 5000
+/**
+ * Force a restart when the mic HEARS voice but the recognizer delivers no
+ * events for this long. Plain silence must never trigger a restart — cycling
+ * the recognizer during quiet stretches makes Chrome throttle or kill it,
+ * which shows up as a transcript that stops writing anything at all.
+ */
+const STALL_TIMEOUT_MS = 8000
+const WATCHDOG_INTERVAL_MS = 4000
+/** Mic level above this counts as "someone is speaking". */
+const VOICE_LEVEL_THRESHOLD = 0.06
 
 export class LiveTranscriber {
   private recognition: SpeechRecognitionLike | null = null
@@ -56,7 +63,10 @@ export class LiveTranscriber {
   private currentSegmentStart = 0
   private lastSpeakerId = -1
   private lastActivityAt = 0
+  private lastVoiceAt = 0
   private watchdog: number | null = null
+  private restartAttempts = 0
+  private recognitionDead = false
   private recorder: MediaRecorder | null = null
   private recordedChunks: Blob[] = []
 
@@ -76,6 +86,9 @@ export class LiveTranscriber {
     await this.mic.start()
     this.tagger.reset()
     this.running = true
+    this.recognitionDead = false
+    this.restartAttempts = 0
+    this.lastVoiceAt = performance.now()
     this.currentSegmentStart = 0
     this.startRecorder()
 
@@ -86,15 +99,26 @@ export class LiveTranscriber {
 
     recognition.onresult = (event) => {
       this.lastActivityAt = performance.now()
+      this.restartAttempts = 0
       this.handleResult(event)
     }
     recognition.onerror = (event) => {
       // 'no-speech' and 'aborted' are routine; the rest are worth surfacing.
-      if (event.error === 'network') {
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+        // The browser blocked the speech service (often after too many
+        // programmatic restarts). More restarts make it worse — stop trying.
+        // The session recording keeps capturing, so nothing is lost.
+        this.recognitionDead = true
         useVoxlyStore
           .getState()
           .setError(
-            'Speech service connection hiccup — some words may have been missed. Recognition restarts automatically; check your internet connection if this keeps happening.',
+            'The browser paused live captions. Your audio is still being recorded — press Stop, then "✨ Refine transcript" to transcribe everything on this device.',
+          )
+      } else if (event.error === 'network') {
+        useVoxlyStore
+          .getState()
+          .setError(
+            'Speech service connection hiccup — some words may have been missed. Recognition restarts automatically; the recording still captures everything for Refine.',
           )
       } else if (event.error !== 'no-speech' && event.error !== 'aborted') {
         useVoxlyStore.getState().setError(`Speech recognition error: ${event.error}`)
@@ -103,18 +127,21 @@ export class LiveTranscriber {
     recognition.onend = () => {
       // Chrome ends recognition after silence gaps or errors. Words that were
       // only interim at that moment would be silently dropped — promote them
-      // into the transcript before restarting, and restart quickly so the
-      // dead window between sessions stays as small as possible.
-      if (!this.running) return
+      // into the transcript before restarting. Restarts back off
+      // exponentially so a misbehaving recognizer isn't hammered into
+      // Chrome's throttling.
+      if (!this.running || this.recognitionDead) return
       this.promoteInterim()
+      const delay = Math.min(50 * 2 ** this.restartAttempts, 3000)
+      this.restartAttempts++
       window.setTimeout(() => {
-        if (!this.running) return
+        if (!this.running || this.recognitionDead) return
         try {
           recognition.start()
         } catch {
           /* already started */
         }
-      }, 50)
+      }, delay)
     }
 
     this.recognition = recognition
@@ -122,11 +149,16 @@ export class LiveTranscriber {
     recognition.start()
 
     // Chrome's recognizer sometimes stalls without firing onend — no results,
-    // no error, just silence. Kick it: stop() forces onend, which restarts.
+    // no error, just silence. Kick it ONLY when the mic hears voice while the
+    // recognizer stays mute; restarting during genuine silence trips Chrome's
+    // restart throttling and kills live captions entirely.
     this.watchdog = window.setInterval(() => {
-      if (!this.running) return
-      if (performance.now() - this.lastActivityAt > STALL_TIMEOUT_MS) {
-        this.lastActivityAt = performance.now()
+      if (!this.running || this.recognitionDead) return
+      const now = performance.now()
+      if (this.mic.level > VOICE_LEVEL_THRESHOLD) this.lastVoiceAt = now
+      const voiceIsRecent = now - this.lastVoiceAt < 5000
+      if (voiceIsRecent && now - this.lastActivityAt > STALL_TIMEOUT_MS) {
+        this.lastActivityAt = now
         try {
           this.recognition?.stop()
         } catch {
