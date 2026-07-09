@@ -310,6 +310,12 @@ body {
   .rec-dot { animation: none; }
 }
 
+.engine-badge {
+  color: var(--accent);
+  border-color: rgba(79, 142, 247, 0.4);
+  background: rgba(79, 142, 247, 0.08);
+}
+
 .boost-badge {
   margin-left: auto;
   font-size: 0.72rem;

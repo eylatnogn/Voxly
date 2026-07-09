@@ -37,6 +37,11 @@ interface TranscribeRequest {
   type: 'transcribe'
   /** Mono PCM at 16 kHz. */
   audio: Float32Array
+  /**
+   * Quick mode for live fallback captions: plain transcription of a short
+   * chunk, no timestamps, no chunking overhead.
+   */
+  quick?: boolean
 }
 
 interface ChunkResult {
@@ -44,23 +49,40 @@ interface ChunkResult {
   timestamp: [number, number | null]
 }
 
-self.onmessage = async (event: MessageEvent<TranscribeRequest>) => {
-  if (event.data.type !== 'transcribe') return
-  try {
-    post({ type: 'status', message: 'Loading speech model…' })
-    const { pipeline } = await loadTransformers()
-    const transcriber = await pipeline(
-      'automatic-speech-recognition',
-      'onnx-community/whisper-tiny.en',
-      {
+type Transcriber = (audio: Float32Array, options?: Record<string, unknown>) => Promise<unknown>
+
+// The pipeline is cached so a long-lived worker (live fallback captions)
+// loads the model once and reuses it for every chunk.
+let transcriberPromise: Promise<Transcriber> | null = null
+
+function getTranscriber(): Promise<Transcriber> {
+  if (!transcriberPromise) {
+    transcriberPromise = (async () => {
+      const { pipeline } = await loadTransformers()
+      return pipeline('automatic-speech-recognition', 'onnx-community/whisper-tiny.en', {
         dtype: 'q8',
         progress_callback: (p: { status?: string; progress?: number }) => {
           if (p.status === 'progress' && typeof p.progress === 'number') {
             post({ type: 'progress', progress: Math.round(p.progress) })
           }
         },
-      },
-    )
+      })
+    })()
+  }
+  return transcriberPromise
+}
+
+self.onmessage = async (event: MessageEvent<TranscribeRequest>) => {
+  if (event.data.type !== 'transcribe') return
+  try {
+    post({ type: 'status', message: 'Loading speech model…' })
+    const transcriber = await getTranscriber()
+
+    if (event.data.quick) {
+      const output = (await transcriber(event.data.audio)) as { text: string }
+      post({ type: 'result', chunks: [{ text: output.text, timestamp: [0, null] }], granularity: 'chunk' })
+      return
+    }
 
     post({ type: 'status', message: 'Transcribing…' })
     // Word-level timestamps enable mid-sentence speaker changes downstream;
