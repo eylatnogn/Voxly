@@ -1,4 +1,9 @@
-import { analyzeFrame, type VoiceFrame } from './pitch'
+import {
+  analyzeFrame,
+  DEFAULT_ENERGY_GATE,
+  FAR_FIELD_ENERGY_GATE,
+  type VoiceFrame,
+} from './pitch'
 import { currentDutyCycle } from './power'
 
 /**
@@ -18,6 +23,8 @@ export class MicFeatureCapture {
   private frames: VoiceFrame[] = []
   private startedAt = 0
   private buffer: Float32Array<ArrayBuffer> = new Float32Array(2048)
+  private energyGate = DEFAULT_ENERGY_GATE
+  private levelScale = 8
 
   /** Latest RMS level (0..1) for the UI meter. */
   level = 0
@@ -27,9 +34,19 @@ export class MicFeatureCapture {
     return this.stream
   }
 
-  async start(): Promise<void> {
+  /**
+   * @param highSensitivity Far-field mode for picking up distant voices:
+   * disables the browser's noise suppression and echo cancellation (both are
+   * tuned for close-talking and suppress quiet distant speech as "noise"),
+   * keeps auto-gain boosting the signal, and lowers the analysis energy gate.
+   */
+  async start(highSensitivity = false): Promise<void> {
+    this.energyGate = highSensitivity ? FAR_FIELD_ENERGY_GATE : DEFAULT_ENERGY_GATE
+    this.levelScale = highSensitivity ? 16 : 8
     this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      audio: highSensitivity
+        ? { echoCancellation: false, noiseSuppression: false, autoGainControl: true }
+        : { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     })
     this.context = new AudioContext()
     const source = this.context.createMediaStreamSource(this.stream)
@@ -70,8 +87,8 @@ export class MicFeatureCapture {
     if (!this.analyser || !this.context) return
     this.analyser.getFloatTimeDomainData(this.buffer)
     const time = (performance.now() - this.startedAt) / 1000
-    const frame = analyzeFrame(this.buffer, this.context.sampleRate, time)
-    this.level = frame ? Math.min(1, frame.energy * 8) : 0
+    const frame = analyzeFrame(this.buffer, this.context.sampleRate, time, this.energyGate)
+    this.level = frame ? Math.min(1, frame.energy * this.levelScale) : 0
     if (frame) {
       this.frames.push(frame)
       // Bound memory if no utterance boundary arrives for a long time.

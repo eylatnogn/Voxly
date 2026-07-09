@@ -39,8 +39,16 @@ export function RecorderPanel() {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [micLevel, setMicLevel] = useState(0)
   const [lang, setLang] = useState(defaultLanguage)
+  const [highSensitivity, setHighSensitivity] = useState(
+    () => localStorage.getItem('voxly-mic-sens') === 'high',
+  )
   const [elapsed, setElapsed] = useState(0)
   const liveSupported = isLiveTranscriptionSupported()
+
+  const changeSensitivity = (high: boolean) => {
+    setHighSensitivity(high)
+    localStorage.setItem('voxly-mic-sens', high ? 'high' : 'standard')
+  }
 
   // Session clock — one tick per second, only while recording.
   useEffect(() => {
@@ -79,7 +87,7 @@ export function RecorderPanel() {
     clearSession()
     const transcriber = new LiveTranscriber()
     try {
-      await transcriber.start(lang)
+      await transcriber.start(lang, highSensitivity)
       transcriberRef.current = transcriber
       setMode('live')
     } catch (error) {
@@ -126,6 +134,19 @@ export function RecorderPanel() {
               {label}
             </option>
           ))}
+        </select>
+      </label>
+
+      <label className="lang-row">
+        <span>Mic pickup</span>
+        <select
+          value={highSensitivity ? 'high' : 'standard'}
+          onChange={(e) => changeSensitivity(e.target.value === 'high')}
+          disabled={mode !== 'idle'}
+          title="High pickup disables noise suppression so quiet, distant voices aren't filtered out — best for a phone on the meeting-room table"
+        >
+          <option value="standard">Standard (close-up)</option>
+          <option value="high">High (room / distance)</option>
         </select>
       </label>
 

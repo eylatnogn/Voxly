@@ -19,7 +19,9 @@ export interface VoiceFrame {
 
 const MIN_PITCH_HZ = 60
 const MAX_PITCH_HZ = 400
-const ENERGY_GATE = 0.008
+/** Default RMS gate; pass a lower gate for far-field (distant mic) capture. */
+export const DEFAULT_ENERGY_GATE = 0.008
+export const FAR_FIELD_ENERGY_GATE = 0.003
 /** Normalized autocorrelation must clear this for the frame to count as voiced. */
 const VOICING_THRESHOLD = 0.45
 
@@ -32,12 +34,13 @@ export function analyzeFrame(
   samples: Float32Array,
   sampleRate: number,
   time: number,
+  energyGate: number = DEFAULT_ENERGY_GATE,
 ): VoiceFrame | null {
   const n = samples.length
   let sumSquares = 0
   for (let i = 0; i < n; i++) sumSquares += samples[i] * samples[i]
   const energy = Math.sqrt(sumSquares / n)
-  if (energy < ENERGY_GATE) return null
+  if (energy < energyGate) return null
 
   const minLag = Math.floor(sampleRate / MAX_PITCH_HZ)
   const maxLag = Math.min(Math.floor(sampleRate / MIN_PITCH_HZ), n - 1)

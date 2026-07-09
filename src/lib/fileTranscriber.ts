@@ -101,7 +101,26 @@ async function decodeToMono(file: File): Promise<{ pcm: Float32Array; duration: 
   source.connect(offline.destination)
   source.start()
   const rendered = await offline.startRendering()
-  return { pcm: rendered.getChannelData(0), duration: decoded.duration }
+  const pcm = rendered.getChannelData(0)
+  normalizeQuietAudio(pcm)
+  return { pcm, duration: decoded.duration }
+}
+
+/**
+ * Boost quiet recordings (e.g. speakers far from the microphone) to full
+ * scale before transcription and voice analysis — both Whisper and the pitch
+ * tracker perform noticeably better on well-leveled audio. Loud recordings
+ * are left untouched.
+ */
+function normalizeQuietAudio(pcm: Float32Array): void {
+  let peak = 0
+  for (let i = 0; i < pcm.length; i++) {
+    const magnitude = Math.abs(pcm[i])
+    if (magnitude > peak) peak = magnitude
+  }
+  if (peak >= 0.5 || peak <= 0) return
+  const gain = Math.min(0.9 / peak, 24)
+  for (let i = 0; i < pcm.length; i++) pcm[i] *= gain
 }
 
 function runWhisper(pcm: Float32Array): Promise<WhisperResult | null> {

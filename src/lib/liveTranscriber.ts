@@ -64,11 +64,11 @@ export class LiveTranscriber {
     return this.mic.level
   }
 
-  async start(lang: string): Promise<void> {
+  async start(lang: string, highSensitivity = false): Promise<void> {
     const Ctor = getSpeechRecognition()
     if (!Ctor) throw new Error('This browser does not support the Web Speech API. Try Chrome or Edge, or use the audio-file mode.')
 
-    await this.mic.start()
+    await this.mic.start(highSensitivity)
     this.tagger.reset()
     this.running = true
     this.currentSegmentStart = 0
