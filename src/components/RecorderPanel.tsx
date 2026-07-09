@@ -40,6 +40,7 @@ export function RecorderPanel() {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [micLevel, setMicLevel] = useState(0)
   const [micBoost, setMicBoost] = useState(1)
+  const [captionEngine, setCaptionEngine] = useState<'browser' | 'on-device'>('browser')
   const [lang, setLang] = useState(defaultLanguage)
   const [elapsed, setElapsed] = useState(0)
   const [autoRefine, setAutoRefine] = useState(
@@ -107,6 +108,7 @@ export function RecorderPanel() {
     const timer = window.setInterval(() => {
       setMicLevel(transcriberRef.current?.micLevel ?? 0)
       setMicBoost(transcriberRef.current?.micBoost ?? 1)
+      setCaptionEngine(transcriberRef.current?.captionEngine ?? 'browser')
     }, interval)
     return () => clearInterval(timer)
   }, [mode])
@@ -183,15 +185,15 @@ export function RecorderPanel() {
         <button
           className="btn btn-record"
           onClick={() => void startLive()}
-          disabled={mode === 'file' || !liveSupported}
-          title={liveSupported ? undefined : 'Web Speech API not available in this browser'}
+          disabled={mode === 'file'}
         >
           ● Record meeting
         </button>
       )}
-      {!liveSupported && (
+      {!liveSupported && mode !== 'live' && (
         <p className="hint">
-          Live dictation needs Chrome or Edge. Audio-file transcription works everywhere.
+          This browser has no native dictation, so live captions use the on-device engine
+          (words appear every ~10 s).
         </p>
       )}
       {mode !== 'live' && (
@@ -208,6 +210,14 @@ export function RecorderPanel() {
             <span>
               Recording · {Math.floor(elapsed / 60)}:{(elapsed % 60).toString().padStart(2, '0')}
             </span>
+            {captionEngine === 'on-device' && (
+              <span
+                className="boost-badge engine-badge"
+                title="Browser captions went quiet, so the on-device engine is captioning — words appear every ~10 s. Switches back automatically."
+              >
+                on-device
+              </span>
+            )}
             {micBoost > 1.2 && (
               <span
                 className="boost-badge"
@@ -222,8 +232,8 @@ export function RecorderPanel() {
           </div>
           {elapsed > 12 && segments.filter((s) => !s.interim).length === 0 && (
             <p className="hint">
-              No live captions yet — that's okay: the recording is capturing everything, and
-              you'll get the full transcript when you stop.
+              Captions warming up — the recording is already capturing everything, and the
+              on-device engine steps in automatically if the browser stays quiet.
             </p>
           )}
         </>

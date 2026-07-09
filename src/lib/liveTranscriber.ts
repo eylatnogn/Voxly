@@ -4,13 +4,22 @@ import { useVoxlyStore } from '../store'
 import type { TranscriptSegment } from '../types'
 
 /**
- * Live talk-to-text built on the Web Speech API.
+ * Live talk-to-text with two independent engines, so words keep appearing no
+ * matter what the platform does:
  *
- * The browser delegates recognition to the platform speech service (often
- * hardware-accelerated and shared with the OS keyboard dictation), which is
- * dramatically cheaper on battery than running a neural model in JS. In
- * parallel, a low-duty-cycle mic analyser collects pitch/tone frames; when a
- * phrase is finalized we classify those frames to tag the speaker.
+ * 1. PRIMARY — the Web Speech API. The browser's native speech service:
+ *    instant interim words, cheap on battery. But it is cloud-backed and can
+ *    stall, get throttled, or not exist at all (Firefox, iOS).
+ * 2. FALLBACK — on-device Whisper over rolling ~10 s PCM chunks tapped from
+ *    the mic graph. Engages automatically whenever the primary goes quiet
+ *    while voice is clearly present, is blocked, or is unsupported; stands
+ *    down the moment the primary recovers. Higher latency (one chunk), but
+ *    it cannot be taken away by the browser.
+ *
+ * In parallel, a low-duty-cycle mic analyser collects pitch/tone frames;
+ * when a phrase is finalized we classify those frames to tag the speaker.
+ * On stop, the full session recording is re-transcribed anyway (auto-refine),
+ * so the final transcript never depends on either live engine.
  */
 
 type SpeechRecognitionLike = {
@@ -53,6 +62,10 @@ const STALL_TIMEOUT_MS = 8000
 const WATCHDOG_INTERVAL_MS = 4000
 /** Mic level above this counts as "someone is speaking". */
 const VOICE_LEVEL_THRESHOLD = 0.06
+/** Voice present but no recognizer events for this long → fallback captions. */
+const FALLBACK_AFTER_MS = 12000
+/** Fallback chunk length; also the fallback caption latency. */
+const FALLBACK_CHUNK_SECONDS = 10
 
 export class LiveTranscriber {
   private recognition: SpeechRecognitionLike | null = null
@@ -66,7 +79,13 @@ export class LiveTranscriber {
   private lastVoiceAt = 0
   private watchdog: number | null = null
   private restartAttempts = 0
-  private recognitionDead = false
+  /** Consecutive hard blocks from the speech service; drives retry cooldown. */
+  private recogFailures = 0
+  private cooldownUntil = 0
+  private fallbackWorker: Worker | null = null
+  private fallbackActive = false
+  private fallbackBusy = false
+  private fallbackNoticeShown = false
   private recorder: MediaRecorder | null = null
   private recordedChunks: Blob[] = []
   private wakeLock: { release: () => Promise<void> } | null = null
@@ -80,16 +99,22 @@ export class LiveTranscriber {
     return this.mic.boost
   }
 
+  /** Which live-caption engine is currently producing text, for display. */
+  get captionEngine(): 'browser' | 'on-device' {
+    return this.fallbackActive ? 'on-device' : 'browser'
+  }
+
   async start(lang: string): Promise<void> {
     const Ctor = getSpeechRecognition()
-    if (!Ctor) throw new Error('This browser does not support the Web Speech API. Try Chrome or Edge, or use the audio-file mode.')
 
     await this.mic.start()
     this.mic.onTrackEnded = () => this.handleMicRevoked()
     this.tagger.reset()
     this.running = true
-    this.recognitionDead = false
     this.restartAttempts = 0
+    this.recogFailures = 0
+    this.cooldownUntil = 0
+    this.fallbackNoticeShown = false
     this.lastVoiceAt = performance.now()
     this.currentSegmentStart = 0
     this.startRecorder()
@@ -99,6 +124,13 @@ export class LiveTranscriber {
     void this.acquireWakeLock()
     document.addEventListener('visibilitychange', this.onVisibility)
 
+    if (!Ctor) {
+      // No Web Speech API (Firefox, iOS, …): live captions come entirely from
+      // the on-device engine.
+      this.activateFallback()
+      return
+    }
+
     const recognition = new Ctor()
     recognition.lang = lang
     recognition.continuous = true
@@ -107,26 +139,24 @@ export class LiveTranscriber {
     recognition.onresult = (event) => {
       this.lastActivityAt = performance.now()
       this.restartAttempts = 0
+      this.recogFailures = 0
+      this.cooldownUntil = 0
+      // The primary engine is alive again — stand the fallback down.
+      this.deactivateFallback()
       this.handleResult(event)
     }
     recognition.onerror = (event) => {
       // 'no-speech' and 'aborted' are routine; the rest are worth surfacing.
       if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
         // The browser blocked the speech service (often after too many
-        // programmatic restarts). More restarts make it worse — stop trying.
-        // The session recording keeps capturing, so nothing is lost.
-        this.recognitionDead = true
-        useVoxlyStore
-          .getState()
-          .setError(
-            'The browser paused live captions. Your audio is still being recorded — press Stop, then "✨ Refine transcript" to transcribe everything on this device.',
-          )
+        // programmatic restarts). Cool down with growing intervals — never
+        // give up permanently — and caption on-device meanwhile.
+        this.recogFailures++
+        this.cooldownUntil =
+          performance.now() + Math.min(5000 * 2 ** (this.recogFailures - 1), 30000)
+        this.activateFallback()
       } else if (event.error === 'network') {
-        useVoxlyStore
-          .getState()
-          .setError(
-            'Speech service connection hiccup — some words may have been missed. Recognition restarts automatically; the recording still captures everything for Refine.',
-          )
+        this.activateFallback()
       } else if (event.error !== 'no-speech' && event.error !== 'aborted') {
         useVoxlyStore.getState().setError(`Speech recognition error: ${event.error}`)
       }
@@ -135,20 +165,21 @@ export class LiveTranscriber {
       // Chrome ends recognition after silence gaps or errors. Words that were
       // only interim at that moment would be silently dropped — promote them
       // into the transcript before restarting. Restarts back off
-      // exponentially so a misbehaving recognizer isn't hammered into
-      // Chrome's throttling.
-      if (!this.running || this.recognitionDead) return
+      // exponentially (and respect the block cooldown) so a misbehaving
+      // recognizer isn't hammered into Chrome's throttling.
+      if (!this.running) return
       this.promoteInterim()
-      const delay = Math.min(50 * 2 ** this.restartAttempts, 3000)
+      const backoff = Math.min(50 * 2 ** this.restartAttempts, 3000)
+      const cooldownWait = Math.max(0, this.cooldownUntil - performance.now())
       this.restartAttempts++
       window.setTimeout(() => {
-        if (!this.running || this.recognitionDead) return
+        if (!this.running) return
         try {
           recognition.start()
         } catch {
           /* already started */
         }
-      }, delay)
+      }, Math.max(backoff, cooldownWait))
     }
 
     this.recognition = recognition
@@ -158,9 +189,10 @@ export class LiveTranscriber {
     // Chrome's recognizer sometimes stalls without firing onend — no results,
     // no error, just silence. Kick it ONLY when the mic hears voice while the
     // recognizer stays mute; restarting during genuine silence trips Chrome's
-    // restart throttling and kills live captions entirely.
+    // restart throttling. If the mute stretch grows past FALLBACK_AFTER_MS,
+    // bring in the on-device engine so words keep appearing regardless.
     this.watchdog = window.setInterval(() => {
-      if (!this.running || this.recognitionDead) return
+      if (!this.running) return
       const now = performance.now()
       if (this.mic.level > VOICE_LEVEL_THRESHOLD) this.lastVoiceAt = now
       const voiceIsRecent = now - this.lastVoiceAt < 5000
@@ -172,7 +204,75 @@ export class LiveTranscriber {
           /* not running */
         }
       }
+      if (!this.fallbackActive && voiceIsRecent && now - this.lastCaptionAt() > FALLBACK_AFTER_MS) {
+        this.activateFallback()
+      }
     }, WATCHDOG_INTERVAL_MS)
+    this.sessionStartAt = performance.now()
+  }
+
+  private sessionStartAt = 0
+
+  /** Most recent moment the primary engine produced anything. */
+  private lastCaptionAt(): number {
+    return Math.max(this.lastActivityAt, this.sessionStartAt)
+  }
+
+  // ─── On-device fallback captions ─────────────────────────────────────
+
+  /**
+   * Rolling-chunk Whisper captions from the mic's PCM tap. Only runs while
+   * the primary engine is failing, so its battery cost applies exactly when
+   * it is worth paying.
+   */
+  private activateFallback(): void {
+    if (!this.running || this.fallbackActive) return
+    this.fallbackActive = true
+    if (!this.fallbackNoticeShown) {
+      this.fallbackNoticeShown = true
+      useVoxlyStore
+        .getState()
+        .setError(
+          'Browser captions went quiet — switched to on-device captions (words appear every ~10 s). The recording is unaffected.',
+        )
+    }
+    if (!this.fallbackWorker) {
+      this.fallbackWorker = new Worker(new URL('../workers/whisperWorker.ts', import.meta.url), {
+        type: 'module',
+      })
+      this.fallbackWorker.onmessage = (event: MessageEvent) => {
+        const msg = event.data as { type: string; chunks?: Array<{ text: string }> }
+        if (msg.type === 'result') {
+          this.fallbackBusy = false
+          const text = (msg.chunks ?? []).map((c) => c.text).join(' ').trim()
+          // Drop results that land after the primary engine recovered.
+          if (this.running && this.fallbackActive && text) this.finalizeUtterance(text)
+        } else if (msg.type === 'error') {
+          this.fallbackBusy = false
+        }
+      }
+    }
+    this.mic.startPcmTap((pcm, sampleRate) => this.onFallbackChunk(pcm, sampleRate), FALLBACK_CHUNK_SECONDS)
+  }
+
+  private deactivateFallback(): void {
+    if (!this.fallbackActive) return
+    this.fallbackActive = false
+    this.mic.stopPcmTap()
+    // Keep the worker (model stays warm) in case the primary fails again.
+  }
+
+  private onFallbackChunk(pcm: Float32Array, sampleRate: number): void {
+    if (!this.running || !this.fallbackActive || !this.fallbackWorker) return
+    if (this.fallbackBusy) return // device slower than realtime — skip a chunk
+    // Skip silent chunks entirely.
+    let sumSquares = 0
+    for (let i = 0; i < pcm.length; i += 4) sumSquares += pcm[i] * pcm[i]
+    if (Math.sqrt(sumSquares / (pcm.length / 4)) < 0.004) return
+
+    const audio = downsampleTo16k(pcm, sampleRate)
+    this.fallbackBusy = true
+    this.fallbackWorker.postMessage({ type: 'transcribe', audio, quick: true }, [audio.buffer])
   }
 
   private handleResult(event: SpeechRecognitionEventLike): void {
@@ -321,6 +421,10 @@ export class LiveTranscriber {
       clearInterval(this.watchdog)
       this.watchdog = null
     }
+    this.deactivateFallback()
+    this.fallbackWorker?.terminate()
+    this.fallbackWorker = null
+    this.fallbackBusy = false
     this.recognition?.stop()
     this.recognition = null
     // Whatever was being said when the user hit stop belongs in the
@@ -335,4 +439,15 @@ export class LiveTranscriber {
 
 function capitalize(text: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1)
+}
+
+/** Nearest-sample decimation to Whisper's 16 kHz — plenty for ASR. */
+function downsampleTo16k(pcm: Float32Array, fromRate: number): Float32Array {
+  if (fromRate === 16000) return pcm.slice()
+  const ratio = fromRate / 16000
+  const out = new Float32Array(Math.floor(pcm.length / ratio))
+  for (let i = 0; i < out.length; i++) {
+    out[i] = pcm[Math.floor(i * ratio)]
+  }
+  return out
 }

@@ -39,6 +39,8 @@ export class MicFeatureCapture {
   private gainNode: GainNode | null = null
   private boostedOut: MediaStreamAudioDestinationNode | null = null
   private timer: number | null = null
+  private tapNode: ScriptProcessorNode | null = null
+  private tapSink: GainNode | null = null
   private frames: VoiceFrame[] = []
   private startedAt = 0
   private buffer: Float32Array<ArrayBuffer> = new Float32Array(2048)
@@ -153,6 +155,60 @@ export class MicFeatureCapture {
     }
   }
 
+  /**
+   * Tap the amplified audio as raw PCM chunks (~chunkSeconds each) — used by
+   * the on-device fallback captions when the browser recognizer goes quiet.
+   * Costs one buffer copy per 85 ms while active; detached when not needed.
+   */
+  startPcmTap(
+    onChunk: (pcm: Float32Array, sampleRate: number) => void,
+    chunkSeconds = 10,
+  ): void {
+    if (!this.context || !this.analyser || this.tapNode) return
+    const proc = this.context.createScriptProcessor(4096, 1, 1)
+    const targetSamples = this.context.sampleRate * chunkSeconds
+    let buffers: Float32Array[] = []
+    let collected = 0
+    proc.onaudioprocess = (event) => {
+      const data = event.inputBuffer.getChannelData(0)
+      buffers.push(new Float32Array(data))
+      collected += data.length
+      if (collected >= targetSamples) {
+        const merged = new Float32Array(collected)
+        let offset = 0
+        for (const b of buffers) {
+          merged.set(b, offset)
+          offset += b.length
+        }
+        buffers = []
+        collected = 0
+        onChunk(merged, this.context!.sampleRate)
+      }
+    }
+    // ScriptProcessor only runs when routed to the destination; a zero-gain
+    // sink keeps it silent.
+    const sink = this.context.createGain()
+    sink.gain.value = 0
+    this.analyser.connect(proc)
+    proc.connect(sink)
+    sink.connect(this.context.destination)
+    this.tapNode = proc
+    this.tapSink = sink
+  }
+
+  stopPcmTap(): void {
+    if (this.tapNode) {
+      this.analyser?.disconnect(this.tapNode)
+      this.tapNode.disconnect()
+      this.tapNode.onaudioprocess = null
+      this.tapNode = null
+    }
+    if (this.tapSink) {
+      this.tapSink.disconnect()
+      this.tapSink = null
+    }
+  }
+
   /** Take the frames accumulated since the last drain (one utterance). */
   drainFrames(): VoiceFrame[] {
     const frames = this.frames
@@ -166,6 +222,7 @@ export class MicFeatureCapture {
 
   stop(): void {
     document.removeEventListener('visibilitychange', this.onVisibility)
+    this.stopPcmTap()
     if (this.timer !== null) clearTimeout(this.timer)
     this.timer = null
     this.stream?.getTracks().forEach((t) => {
