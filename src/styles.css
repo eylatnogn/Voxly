@@ -696,6 +696,32 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+.speaker-merge {
+  flex-shrink: 0;
+  width: 2.1rem;
+  padding: 0.15rem 0.25rem;
+  border-radius: 7px;
+  border: 1px solid var(--panel-border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  font-family: inherit;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  text-align: center;
+}
+
+.speaker-merge:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.speaker-merge option {
+  background: var(--panel);
+  color: var(--text);
+}
+
 /* ─── Drafts panel ────────────────────────────────────────────────────── */
 
 .drafts-panel ul {
