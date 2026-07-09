@@ -29,10 +29,13 @@ export interface VoicedRegion {
 /** Silence longer than this splits two voiced regions. */
 const REGION_GAP_SEC = 0.75
 /**
- * A sustained jump in log-pitch this large (~35%) splits a region even with
+ * A sustained jump in log-pitch this large (~55%) splits a region even with
  * no silence — catching interruptions and back-to-back speaker handoffs.
+ * Kept well above one voice's natural swing (questions and emphasis routinely
+ * move pitch ±30%), and it must hold for two consecutive frames so a single
+ * mis-tracked frame can't split a region.
  */
-const PITCH_JUMP_LOG = 0.3
+const PITCH_JUMP_LOG = 0.45
 /** A word farther than this from any voiced region keeps the previous speaker. */
 const NEAREST_REGION_TOLERANCE_SEC = 1.0
 /** A pause longer than this starts a new segment even for the same speaker. */
@@ -70,33 +73,67 @@ export function buildVoicedRegions(
       medianPitchHz: match ? match.medianPitchHz : 0,
     })
   }
+  // Clusters may have merged as evidence accumulated; point earlier regions
+  // at the surviving speaker ids.
+  for (const region of regions) {
+    if (region.speakerId >= 0) region.speakerId = tagger.resolve(region.speakerId)
+  }
   return regions
 }
 
 /**
  * Split a silence-free run of frames wherever the voice's pitch jumps
  * decisively — the strongest available cue that a different person took over
- * without a pause. Tracks a smoothed log-pitch so vibrato and octave-stable
- * drift don't cause splits.
+ * without a pause. Tracks a smoothed log-pitch so vibrato and gradual drift
+ * don't cause splits, and requires TWO consecutive frames agreeing on the new
+ * pitch before splitting, so one mis-tracked frame is absorbed as noise.
  */
 function splitOnPitchJumps(group: VoiceFrame[]): VoiceFrame[][] {
   const out: VoiceFrame[][] = []
   let current: VoiceFrame[] = []
   let runLogPitch: number | null = null
-  for (const frame of group) {
-    if (frame.pitchHz > 0) {
-      const logPitch = Math.log(frame.pitchHz)
-      if (runLogPitch !== null && Math.abs(logPitch - runLogPitch) > PITCH_JUMP_LOG) {
-        if (current.length > 0) out.push(current)
-        current = []
-        runLogPitch = logPitch
-      } else {
-        runLogPitch =
-          runLogPitch === null ? logPitch : runLogPitch + (logPitch - runLogPitch) * 0.3
-      }
-    }
-    current.push(frame)
+  let pending: VoiceFrame[] = []
+  let pendingLogPitch: number | null = null
+
+  const absorbPending = () => {
+    current.push(...pending)
+    pending = []
+    pendingLogPitch = null
   }
+
+  for (const frame of group) {
+    if (frame.pitchHz <= 0) {
+      // Unvoiced frames tag along with whichever run is being built.
+      ;(pending.length > 0 ? pending : current).push(frame)
+      continue
+    }
+    const logPitch = Math.log(frame.pitchHz)
+    if (runLogPitch === null) {
+      runLogPitch = logPitch
+      current.push(frame)
+      continue
+    }
+    if (Math.abs(logPitch - runLogPitch) > PITCH_JUMP_LOG) {
+      if (pendingLogPitch !== null && Math.abs(logPitch - pendingLogPitch) < 0.2) {
+        // Second consecutive frame confirming the new voice — split here.
+        if (current.length > 0) out.push(current)
+        current = [...pending, frame]
+        runLogPitch = (pendingLogPitch + logPitch) / 2
+        pending = []
+        pendingLogPitch = null
+      } else {
+        if (pending.length > 0) absorbPending()
+        pending = [frame]
+        pendingLogPitch = logPitch
+      }
+    } else {
+      // Conforming frame: any lone outlier before it was tracker noise.
+      if (pending.length > 0) absorbPending()
+      current.push(frame)
+      runLogPitch += (logPitch - runLogPitch) * 0.3
+    }
+  }
+  if (pending.length > 0) absorbPending()
   if (current.length > 0) out.push(current)
   return out
 }

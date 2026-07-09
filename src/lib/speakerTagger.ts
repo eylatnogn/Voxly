@@ -9,11 +9,22 @@ import type { VoiceFrame } from './pitch'
  * A new utterance is assigned to the nearest cluster if it is within the
  * match radius, otherwise a new speaker is created (capped, so noise can't
  * mint endless speakers).
+ *
+ * Human pitch is not a fixed number — the same person's utterance medians
+ * swing ±20–40% with emphasis, questions, and fatigue. The tagger is built
+ * to forgive that: a wide match radius, octave-error folding, and merging of
+ * clusters that drift together (callers are told via drainMerges so already
+ * tagged transcript can be retagged).
  */
 
 export interface SpeakerMatch {
   speakerId: number
   medianPitchHz: number
+}
+
+export interface SpeakerMerge {
+  from: number
+  to: number
 }
 
 interface Cluster {
@@ -25,14 +36,24 @@ interface Cluster {
 }
 
 const MAX_SPEAKERS = 8
-/** Distance in log-feature space below which an utterance joins a cluster. */
-const MATCH_RADIUS = 0.18
-/** Frames with pitch outside this band are ignored as non-speech artifacts. */
+/**
+ * Distance in log-feature space below which an utterance joins a cluster.
+ * 0.35 ≈ a 40% pitch difference — generous enough for one voice's natural
+ * range, while typical male/female medians (~110 vs ~210 Hz, log gap ~0.65)
+ * stay clearly apart.
+ */
+const MATCH_RADIUS = 0.35
+/** Two clusters closer than this are the same voice that got split — merge. */
+const MERGE_RADIUS = 0.25
+/** Centroid (timbre) is ~10× noisier than pitch, so it only nudges distance. */
+const CENTROID_WEIGHT = 0.2
 const MIN_VOICED_FRAMES = 3
 
 export class SpeakerTagger {
   private clusters: Cluster[] = []
   private nextId = 0
+  private aliases = new Map<number, number>()
+  private merges: SpeakerMerge[] = []
 
   /**
    * Classify one utterance from its voiced frames. Returns null when there
@@ -42,7 +63,7 @@ export class SpeakerTagger {
     const voiced = frames.filter((f) => f.pitchHz > 0 && f.centroidHz > 0)
     if (voiced.length < MIN_VOICED_FRAMES) return null
 
-    const pitch = median(voiced.map((f) => f.pitchHz))
+    const pitch = octaveFoldedMedian(voiced.map((f) => f.pitchHz))
     const centroid = median(voiced.map((f) => f.centroidHz))
     const logPitch = Math.log(pitch)
     const logCentroid = Math.log(centroid)
@@ -50,45 +71,94 @@ export class SpeakerTagger {
     let best: Cluster | null = null
     let bestDist = Infinity
     for (const cluster of this.clusters) {
-      const dp = logPitch - cluster.logPitch
-      // Centroid (timbre) is a far noisier feature than pitch — measured
-      // log-spread within one voice is ~10× pitch's — so it only nudges the
-      // distance rather than driving it.
-      const dc = (logCentroid - cluster.logCentroid) * 0.2
-      const dist = Math.sqrt(dp * dp + dc * dc)
+      const dist = clusterDistance(cluster, logPitch, logCentroid)
       if (dist < bestDist) {
         bestDist = dist
         best = cluster
       }
     }
 
-    if (best && bestDist <= MATCH_RADIUS) {
+    let assigned: Cluster
+    if (best && (bestDist <= MATCH_RADIUS || this.clusters.length >= MAX_SPEAKERS)) {
+      // Within radius — or over the cap, where the nearest cluster beats
+      // inventing implausible extra speakers.
       updateCluster(best, logPitch, logCentroid, pitch)
-      return { speakerId: best.id, medianPitchHz: median(best.pitchSamples) }
+      assigned = best
+    } else {
+      assigned = {
+        id: this.nextId++,
+        logPitch,
+        logCentroid,
+        weight: 1,
+        pitchSamples: [pitch],
+      }
+      this.clusters.push(assigned)
     }
 
-    if (this.clusters.length >= MAX_SPEAKERS && best) {
-      // Over the cap: fall back to the nearest cluster rather than inventing
-      // implausible extra speakers.
-      updateCluster(best, logPitch, logCentroid, pitch)
-      return { speakerId: best.id, medianPitchHz: median(best.pitchSamples) }
-    }
+    this.mergeNearbyClusters()
+    const canonicalId = this.resolve(assigned.id)
+    const canonical = this.clusters.find((c) => c.id === canonicalId) ?? assigned
+    return { speakerId: canonicalId, medianPitchHz: median(canonical.pitchSamples) }
+  }
 
-    const cluster: Cluster = {
-      id: this.nextId++,
-      logPitch,
-      logCentroid,
-      weight: 1,
-      pitchSamples: [pitch],
+  /** Follow merge aliases to the surviving cluster id. */
+  resolve(id: number): number {
+    let current = id
+    while (this.aliases.has(current)) current = this.aliases.get(current)!
+    return current
+  }
+
+  /**
+   * Merges that happened since the last drain, oldest first. Callers should
+   * retag existing transcript segments from `from` to `to`.
+   */
+  drainMerges(): SpeakerMerge[] {
+    const merges = this.merges
+    this.merges = []
+    return merges
+  }
+
+  private mergeNearbyClusters(): void {
+    let merged = true
+    while (merged) {
+      merged = false
+      outer: for (let i = 0; i < this.clusters.length; i++) {
+        for (let j = i + 1; j < this.clusters.length; j++) {
+          const a = this.clusters[i]
+          const b = this.clusters[j]
+          const dist = clusterDistance(a, b.logPitch, b.logCentroid)
+          if (dist >= MERGE_RADIUS) continue
+          const [survivor, absorbed] = a.weight >= b.weight ? [a, b] : [b, a]
+          const total = survivor.weight + absorbed.weight
+          survivor.logPitch =
+            (survivor.logPitch * survivor.weight + absorbed.logPitch * absorbed.weight) / total
+          survivor.logCentroid =
+            (survivor.logCentroid * survivor.weight + absorbed.logCentroid * absorbed.weight) /
+            total
+          survivor.weight = total
+          survivor.pitchSamples = survivor.pitchSamples.concat(absorbed.pitchSamples).slice(-50)
+          this.clusters.splice(this.clusters.indexOf(absorbed), 1)
+          this.aliases.set(absorbed.id, survivor.id)
+          this.merges.push({ from: absorbed.id, to: survivor.id })
+          merged = true
+          break outer
+        }
+      }
     }
-    this.clusters.push(cluster)
-    return { speakerId: cluster.id, medianPitchHz: pitch }
   }
 
   reset(): void {
     this.clusters = []
     this.nextId = 0
+    this.aliases.clear()
+    this.merges = []
   }
+}
+
+function clusterDistance(cluster: Cluster, logPitch: number, logCentroid: number): number {
+  const dp = logPitch - cluster.logPitch
+  const dc = (logCentroid - cluster.logCentroid) * CENTROID_WEIGHT
+  return Math.sqrt(dp * dp + dc * dc)
 }
 
 function updateCluster(cluster: Cluster, logPitch: number, logCentroid: number, pitch: number): void {
@@ -100,6 +170,22 @@ function updateCluster(cluster: Cluster, logPitch: number, logCentroid: number, 
   cluster.weight += 1
   cluster.pitchSamples.push(pitch)
   if (cluster.pitchSamples.length > 50) cluster.pitchSamples.shift()
+}
+
+/**
+ * Median that is robust to octave errors: autocorrelation pitch trackers
+ * occasionally lock onto half or double the true fundamental, which used to
+ * yank an utterance's median far enough to mint a phantom speaker. Fold such
+ * frames back toward the raw median before taking the final median.
+ */
+function octaveFoldedMedian(pitches: number[]): number {
+  const raw = median(pitches)
+  const folded = pitches.map((p) => {
+    if (p > raw * 1.6) return p / 2
+    if (p < raw / 1.6) return p * 2
+    return p
+  })
+  return median(folded)
 }
 
 function median(values: number[]): number {

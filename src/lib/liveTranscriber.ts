@@ -43,6 +43,10 @@ export function isLiveTranscriptionSupported(): boolean {
   return getSpeechRecognition() !== null
 }
 
+/** Force a restart if the recognizer goes completely silent for this long. */
+const STALL_TIMEOUT_MS = 15000
+const WATCHDOG_INTERVAL_MS = 10000
+
 export class LiveTranscriber {
   private recognition: SpeechRecognitionLike | null = null
   private mic = new MicFeatureCapture()
@@ -51,6 +55,8 @@ export class LiveTranscriber {
   private segmentCounter = 0
   private currentSegmentStart = 0
   private lastSpeakerId = -1
+  private lastActivityAt = 0
+  private watchdog: number | null = null
 
   get micLevel(): number {
     return this.mic.level
@@ -70,26 +76,54 @@ export class LiveTranscriber {
     recognition.continuous = true
     recognition.interimResults = true
 
-    recognition.onresult = (event) => this.handleResult(event)
+    recognition.onresult = (event) => {
+      this.lastActivityAt = performance.now()
+      this.handleResult(event)
+    }
     recognition.onerror = (event) => {
-      // 'no-speech' and 'aborted' are routine; anything else is worth surfacing.
-      if (event.error !== 'no-speech' && event.error !== 'aborted') {
+      // 'no-speech' and 'aborted' are routine; the rest are worth surfacing.
+      if (event.error === 'network') {
+        useVoxlyStore
+          .getState()
+          .setError(
+            'Speech service connection hiccup — some words may have been missed. Recognition restarts automatically; check your internet connection if this keeps happening.',
+          )
+      } else if (event.error !== 'no-speech' && event.error !== 'aborted') {
         useVoxlyStore.getState().setError(`Speech recognition error: ${event.error}`)
       }
     }
     recognition.onend = () => {
-      // Chrome ends recognition after silence; restart while the session is live.
-      if (this.running) {
+      // Chrome ends recognition after silence or errors; restart promptly
+      // while the session is live. The small delay avoids the "already
+      // started" race right after an automatic end.
+      if (!this.running) return
+      window.setTimeout(() => {
+        if (!this.running) return
         try {
           recognition.start()
         } catch {
           /* already started */
         }
-      }
+      }, 100)
     }
 
     this.recognition = recognition
+    this.lastActivityAt = performance.now()
     recognition.start()
+
+    // Chrome's recognizer sometimes stalls without firing onend — no results,
+    // no error, just silence. Kick it: stop() forces onend, which restarts.
+    this.watchdog = window.setInterval(() => {
+      if (!this.running) return
+      if (performance.now() - this.lastActivityAt > STALL_TIMEOUT_MS) {
+        this.lastActivityAt = performance.now()
+        try {
+          this.recognition?.stop()
+        } catch {
+          /* not running */
+        }
+      }
+    }, WATCHDOG_INTERVAL_MS)
   }
 
   private handleResult(event: SpeechRecognitionEventLike): void {
@@ -104,6 +138,12 @@ export class LiveTranscriber {
       if (result.isFinal) {
         const frames = this.mic.drainFrames()
         const match = this.tagger.classify(frames)
+        // Clusters that turned out to be the same voice get folded together —
+        // retag everything already attributed to the absorbed speaker.
+        for (const merge of this.tagger.drainMerges()) {
+          store.remapSpeaker(merge.from, merge.to)
+          if (this.lastSpeakerId === merge.from) this.lastSpeakerId = merge.to
+        }
         const speakerId = match ? match.speakerId : this.lastSpeakerId
         if (match) {
           store.ensureSpeaker(match.speakerId, match.medianPitchHz)
@@ -144,6 +184,10 @@ export class LiveTranscriber {
 
   stop(): void {
     this.running = false
+    if (this.watchdog !== null) {
+      clearInterval(this.watchdog)
+      this.watchdog = null
+    }
     this.recognition?.stop()
     this.recognition = null
     this.mic.stop()

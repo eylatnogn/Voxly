@@ -35,6 +35,8 @@ interface VoxlyState {
   clearSession: () => void
   ensureSpeaker: (id: number, medianPitchHz: number) => void
   renameSpeaker: (id: number, name: string) => void
+  /** Retag segments after two speaker clusters turn out to be the same voice. */
+  remapSpeaker: (from: number, to: number) => void
   setSuggestions: (suggestions: EditSuggestion[]) => void
   applySuggestion: (suggestionId: string) => void
   dismissSuggestion: (suggestionId: string) => void
@@ -95,6 +97,14 @@ export const useVoxlyStore = create<VoxlyState>((set) => ({
   renameSpeaker: (id, name) =>
     set((state) => ({
       speakers: state.speakers.map((s) => (s.id === id ? { ...s, name } : s)),
+    })),
+
+  remapSpeaker: (from, to) =>
+    set((state) => ({
+      segments: state.segments.map((s) =>
+        s.speakerId === from ? { ...s, speakerId: to } : s,
+      ),
+      speakers: state.speakers.filter((s) => s.id !== from),
     })),
 
   setSuggestions: (suggestions) => set({ suggestions }),
