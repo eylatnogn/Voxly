@@ -21,7 +21,15 @@ export function TranscriptView() {
   const setError = useVoxlyStore((s) => s.setError)
   const setSegmentSpeaker = useVoxlyStore((s) => s.setSegmentSpeaker)
   const ensureSpeaker = useVoxlyStore((s) => s.ensureSpeaker)
+  const saveDraft = useVoxlyStore((s) => s.saveDraft)
   const [exporting, setExporting] = useState(false)
+  const [justSaved, setJustSaved] = useState(false)
+
+  const onSaveDraft = () => {
+    saveDraft()
+    setJustSaved(true)
+    window.setTimeout(() => setJustSaved(false), 2000)
+  }
 
   const changeSegmentSpeaker = (segmentId: string, value: string) => {
     if (value === 'new') {
@@ -117,6 +125,9 @@ export function TranscriptView() {
       <div className="transcript-header">
         <h2>Transcript</h2>
         <div className="export-buttons">
+          <button className="btn btn-ghost" onClick={onSaveDraft}>
+            {justSaved ? '✓ Saved' : '💾 Save draft'}
+          </button>
           <button className="btn btn-ghost" onClick={exportTxt}>⬇ .txt</button>
           <button className="btn btn-ghost" onClick={exportSrt}>⬇ .srt</button>
           <button className="btn btn-ghost" onClick={() => void exportDocx()} disabled={exporting}>

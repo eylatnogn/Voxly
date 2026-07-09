@@ -3,6 +3,7 @@ import { RecorderPanel } from './components/RecorderPanel'
 import { TranscriptView } from './components/TranscriptView'
 import { SuggestionsPanel } from './components/SuggestionsPanel'
 import { SpeakerLegend } from './components/SpeakerLegend'
+import { DraftsPanel } from './components/DraftsPanel'
 import { PowerBadge } from './components/PowerBadge'
 import { analyzeSegments } from './lib/editAnalyzer'
 import { currentDutyCycle, initPowerMonitor, runWhenIdle } from './lib/power'
@@ -61,6 +62,7 @@ export default function App() {
         <aside className="sidebar">
           <RecorderPanel />
           <SpeakerLegend />
+          <DraftsPanel />
         </aside>
         <section className="transcript-column">
           <TranscriptView />

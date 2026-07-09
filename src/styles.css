@@ -637,6 +637,64 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* ─── Drafts panel ────────────────────────────────────────────────────── */
+
+.drafts-panel ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.draft-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.35rem;
+  border-radius: 9px;
+}
+
+.draft-row:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.draft-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.draft-name-input {
+  width: 100%;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--text);
+  padding: 0.2rem 0.45rem;
+  font-size: 0.88rem;
+  font-family: inherit;
+  text-overflow: ellipsis;
+}
+
+.draft-name-input:hover,
+.draft-name-input:focus {
+  border-color: var(--panel-border);
+  background: #0d1119;
+  outline: none;
+}
+
+.draft-meta {
+  color: var(--text-faint);
+  font-size: 0.72rem;
+  padding-left: 0.45rem;
+}
+
+.draft-actions {
+  display: flex;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+
 /* ─── Suggestions ─────────────────────────────────────────────────────── */
 
 .suggestions-header {

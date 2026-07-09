@@ -1,4 +1,11 @@
 import { create } from 'zustand'
+import {
+  defaultDraftName,
+  MAX_DRAFTS,
+  readDrafts,
+  writeDrafts,
+  type Draft,
+} from './lib/drafts'
 import type {
   EditSuggestion,
   PowerState,
@@ -29,6 +36,7 @@ interface VoxlyState {
   error: string | null
   /** Audio captured during the last live session, for the refine pass. */
   recordingBlob: Blob | null
+  drafts: Draft[]
 
   setMode: (mode: SessionMode) => void
   setError: (error: string | null) => void
@@ -47,6 +55,10 @@ interface VoxlyState {
   setPower: (patch: Partial<PowerState>) => void
   setFileProgress: (progress: number | null, status?: string | null) => void
   setRecordingBlob: (blob: Blob | null) => void
+  saveDraft: () => void
+  loadDraft: (id: string) => void
+  deleteDraft: (id: string) => void
+  renameDraft: (id: string, name: string) => void
 }
 
 export const useVoxlyStore = create<VoxlyState>((set) => ({
@@ -59,6 +71,7 @@ export const useVoxlyStore = create<VoxlyState>((set) => ({
   fileStatus: null,
   error: null,
   recordingBlob: null,
+  drafts: readDrafts(),
 
   setMode: (mode) => set({ mode }),
   setError: (error) => set({ error }),
@@ -166,4 +179,52 @@ export const useVoxlyStore = create<VoxlyState>((set) => ({
     })),
 
   setRecordingBlob: (blob) => set({ recordingBlob: blob }),
+
+  saveDraft: () =>
+    set((state) => {
+      const segments = state.segments.filter((s) => !s.interim)
+      if (segments.length === 0) return {}
+      const draft: Draft = {
+        id: `draft-${Date.now().toString(36)}`,
+        name: defaultDraftName(),
+        savedAt: Date.now(),
+        segments,
+        speakers: state.speakers,
+      }
+      const drafts = [draft, ...state.drafts].slice(0, MAX_DRAFTS)
+      if (!writeDrafts(drafts)) {
+        return { error: 'Could not save the draft — browser storage is full or unavailable.' }
+      }
+      return { drafts }
+    }),
+
+  loadDraft: (id) =>
+    set((state) => {
+      const draft = state.drafts.find((d) => d.id === id)
+      if (!draft) return {}
+      return {
+        segments: draft.segments,
+        speakers: draft.speakers,
+        suggestions: [],
+        mode: 'idle',
+        recordingBlob: null,
+        error: null,
+        fileProgress: null,
+        fileStatus: null,
+      }
+    }),
+
+  deleteDraft: (id) =>
+    set((state) => {
+      const drafts = state.drafts.filter((d) => d.id !== id)
+      writeDrafts(drafts)
+      return { drafts }
+    }),
+
+  renameDraft: (id, name) =>
+    set((state) => {
+      const drafts = state.drafts.map((d) => (d.id === id ? { ...d, name } : d))
+      writeDrafts(drafts)
+      return { drafts }
+    }),
 }))

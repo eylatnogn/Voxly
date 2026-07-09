@@ -19,6 +19,7 @@ export class MicFeatureCapture {
   private context: AudioContext | null = null
   private stream: MediaStream | null = null
   private analyser: AnalyserNode | null = null
+  private boostedOut: MediaStreamAudioDestinationNode | null = null
   private timer: number | null = null
   private frames: VoiceFrame[] = []
   private startedAt = 0
@@ -29,9 +30,13 @@ export class MicFeatureCapture {
   /** Latest RMS level (0..1) for the UI meter. */
   level = 0
 
-  /** The live microphone stream, shared with the session recorder. */
-  get mediaStream(): MediaStream | null {
-    return this.stream
+  /**
+   * Stream for the session recorder. In high-sensitivity mode this is the
+   * amplified signal (gain + soft limiter), so the refine pass hears distant
+   * voices at full level; otherwise the raw microphone.
+   */
+  get recordingStream(): MediaStream | null {
+    return this.boostedOut?.stream ?? this.stream
   }
 
   /**
@@ -41,8 +46,10 @@ export class MicFeatureCapture {
    * keeps auto-gain boosting the signal, and lowers the analysis energy gate.
    */
   async start(highSensitivity = false): Promise<void> {
+    // The 2.5× boost happens upstream of the analyser in high mode, so the
+    // gate/meter see an already-amplified signal.
     this.energyGate = highSensitivity ? FAR_FIELD_ENERGY_GATE : DEFAULT_ENERGY_GATE
-    this.levelScale = highSensitivity ? 16 : 8
+    this.levelScale = highSensitivity ? 10 : 8
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: highSensitivity
         ? { echoCancellation: false, noiseSuppression: false, autoGainControl: true }
@@ -52,7 +59,27 @@ export class MicFeatureCapture {
     const source = this.context.createMediaStreamSource(this.stream)
     this.analyser = this.context.createAnalyser()
     this.analyser.fftSize = 2048
-    source.connect(this.analyser)
+    if (highSensitivity) {
+      // Amplify before analysis/recording: 2.5× gain lifts distant voices,
+      // and a compressor acting as a soft limiter stops nearby speech from
+      // clipping. The pitch tracker, level meter, and the session recording
+      // all read the boosted signal.
+      const gain = this.context.createGain()
+      gain.gain.value = 2.5
+      const limiter = this.context.createDynamicsCompressor()
+      limiter.threshold.value = -12
+      limiter.knee.value = 10
+      limiter.ratio.value = 8
+      limiter.attack.value = 0.004
+      limiter.release.value = 0.2
+      this.boostedOut = this.context.createMediaStreamDestination()
+      source.connect(gain)
+      gain.connect(limiter)
+      limiter.connect(this.analyser)
+      limiter.connect(this.boostedOut)
+    } else {
+      source.connect(this.analyser)
+    }
     this.startedAt = performance.now()
     this.scheduleNext()
 
@@ -116,6 +143,7 @@ export class MicFeatureCapture {
     this.context = null
     this.stream = null
     this.analyser = null
+    this.boostedOut = null
     this.frames = []
     this.level = 0
   }
