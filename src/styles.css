@@ -270,6 +270,17 @@ body {
   font-family: inherit;
 }
 
+.auto-refine-row {
+  user-select: none;
+}
+
+.auto-refine-row input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--ok);
+  cursor: pointer;
+}
+
 .rec-status {
   display: flex;
   align-items: center;

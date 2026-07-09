@@ -42,17 +42,34 @@ export function RecorderPanel() {
   const [micBoost, setMicBoost] = useState(1)
   const [lang, setLang] = useState(defaultLanguage)
   const [elapsed, setElapsed] = useState(0)
+  const [autoRefine, setAutoRefine] = useState(
+    () => localStorage.getItem('voxly-auto-refine') !== 'off',
+  )
+  const lastRefinedRef = useRef<Blob | null>(null)
   const liveSupported = isLiveTranscriptionSupported()
 
-  // Safety net: a session ended with a recording but zero captions means the
-  // browser's live recognizer failed — point straight at the on-device path.
+  const changeAutoRefine = (on: boolean) => {
+    setAutoRefine(on)
+    localStorage.setItem('voxly-auto-refine', on ? 'on' : 'off')
+  }
+
+  // Bulletproofing: live captions are best-effort (the browser's recognizer
+  // is a cloud service that can and does drop words), but the recording
+  // captures everything. When a session ends, automatically run the
+  // on-device Whisper pass over the recording so the final transcript never
+  // depends on the lossy live path.
   useEffect(() => {
-    if (
-      mode === 'idle' &&
-      recordingBlob &&
-      audioKind === 'live' &&
-      segments.filter((s) => !s.interim).length === 0
-    ) {
+    if (mode !== 'idle' || !recordingBlob || audioKind !== 'live') return
+    if (autoRefine) {
+      // Skip token-sized recordings (accidental taps) and never re-run for
+      // the same blob (refine restores it, which re-fires this effect).
+      if (recordingBlob.size > 20000 && lastRefinedRef.current !== recordingBlob) {
+        lastRefinedRef.current = recordingBlob
+        refine()
+      }
+      return
+    }
+    if (segments.filter((s) => !s.interim).length === 0) {
       setError(
         'Live captions didn’t capture anything this session, but the audio was recorded. Tap "✨ Refine transcript" to transcribe it on this device.',
       )
@@ -120,6 +137,7 @@ export function RecorderPanel() {
 
   const refine = () => {
     if (!recordingBlob) return
+    lastRefinedRef.current = recordingBlob
     const file = new File([recordingBlob], 'meeting-recording.webm', {
       type: recordingBlob.type || 'audio/webm',
     })
@@ -146,6 +164,15 @@ export function RecorderPanel() {
             </option>
           ))}
         </select>
+      </label>
+
+      <label className="lang-row auto-refine-row" title="After you stop, the whole recording is re-transcribed on this device with the Whisper model. Nothing gets skipped — live captions become just a preview. First use downloads a ~40 MB model (then cached).">
+        <span>Auto-refine after stop</span>
+        <input
+          type="checkbox"
+          checked={autoRefine}
+          onChange={(e) => changeAutoRefine(e.target.checked)}
+        />
       </label>
 
       {mode === 'live' ? (
@@ -193,6 +220,12 @@ export function RecorderPanel() {
           <div className="mic-meter" aria-hidden="true">
             <div className="mic-meter-fill" style={{ width: `${Math.round(micLevel * 100)}%` }} />
           </div>
+          {elapsed > 12 && segments.filter((s) => !s.interim).length === 0 && (
+            <p className="hint">
+              No live captions yet — that's okay: the recording is capturing everything, and
+              you'll get the full transcript when you stop.
+            </p>
+          )}
         </>
       )}
 
@@ -227,7 +260,7 @@ export function RecorderPanel() {
         </div>
       )}
 
-      {recordingBlob && audioKind === 'live' && mode === 'idle' && (
+      {recordingBlob && audioKind === 'live' && mode === 'idle' && !autoRefine && (
         <>
           <button className="btn btn-refine" onClick={refine}>
             ✨ Refine transcript
