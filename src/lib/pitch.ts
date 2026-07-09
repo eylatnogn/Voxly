@@ -22,9 +22,8 @@ const MAX_PITCH_HZ = 400
 /** Default RMS gate; pass a lower gate for far-field (distant mic) capture. */
 export const DEFAULT_ENERGY_GATE = 0.008
 /**
- * Far-field gate, applied to the already-amplified (4×) signal — the
- * effective raw-mic threshold is ~0.0005, sensitive enough for speech from
- * across a room.
+ * Far-field gate, applied to the adaptively amplified signal — sensitive
+ * enough for speech from across a room once the auto-gain has ramped up.
  */
 export const FAR_FIELD_ENERGY_GATE = 0.002
 /** Normalized autocorrelation must clear this for the frame to count as voiced. */

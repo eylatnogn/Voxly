@@ -1,9 +1,4 @@
-import {
-  analyzeFrame,
-  DEFAULT_ENERGY_GATE,
-  FAR_FIELD_ENERGY_GATE,
-  type VoiceFrame,
-} from './pitch'
+import { analyzeFrame, FAR_FIELD_ENERGY_GATE, type VoiceFrame } from './pitch'
 import { currentDutyCycle } from './power'
 
 /**
@@ -12,50 +7,56 @@ import { currentDutyCycle } from './power'
  * an AnalyserNode buffers the signal continuously in native code (cheap) and
  * we only pull + analyze a snapshot a few times per second from a JS timer.
  *
+ * Sensitivity is fully automatic: an adaptive gain stage (1×–8×) targets a
+ * steady speech level, so a voice across the room gets boosted while someone
+ * next to the phone is pulled back, with a soft limiter preventing clipping.
+ * The boosted signal feeds the pitch analysis, the level meter, and the
+ * session recording used by the Whisper refine pass.
+ *
+ * IMPORTANT: capture constraints are never customized. Requesting a "raw"
+ * stream (noise suppression / echo cancellation off) reconfigures the shared
+ * microphone session on mobile and starves the platform speech recognizer.
+ * All boosting happens in our own WebAudio graph, which cannot affect the
+ * recognizer's feed.
+ *
  * Frames are buffered per-utterance; the live transcriber drains them when a
  * phrase is finalized to decide who was speaking.
  */
+
+/** Adaptive gain aims for this RMS on voiced audio. */
+const TARGET_SPEECH_RMS = 0.18
+const MIN_GAIN = 1
+const MAX_GAIN = 8
+/** Ignore post-gain energy below this when adapting (true silence). */
+const ADAPT_FLOOR = 0.001
+/** Max multiplicative gain change per analysis frame — smooth, no pumping. */
+const ADAPT_STEP = 0.15
+
 export class MicFeatureCapture {
   private context: AudioContext | null = null
   private stream: MediaStream | null = null
   private analyser: AnalyserNode | null = null
+  private gainNode: GainNode | null = null
   private boostedOut: MediaStreamAudioDestinationNode | null = null
   private timer: number | null = null
   private frames: VoiceFrame[] = []
   private startedAt = 0
   private buffer: Float32Array<ArrayBuffer> = new Float32Array(2048)
-  private energyGate = DEFAULT_ENERGY_GATE
-  private levelScale = 8
 
   /** Latest RMS level (0..1) for the UI meter. */
   level = 0
 
-  /**
-   * Stream for the session recorder. In high-sensitivity mode this is the
-   * amplified signal (gain + soft limiter), so the refine pass hears distant
-   * voices at full level; otherwise the raw microphone.
-   */
+  /** Current adaptive boost factor, for display. */
+  get boost(): number {
+    return this.gainNode?.gain.value ?? 1
+  }
+
+  /** Amplified stream for the session recorder. */
   get recordingStream(): MediaStream | null {
     return this.boostedOut?.stream ?? this.stream
   }
 
-  /**
-   * @param highSensitivity Far-field mode for picking up distant voices: a
-   * 4× amplifier + soft limiter boosts the signal for voice analysis and the
-   * session recording, and the analysis energy gate drops.
-   *
-   * IMPORTANT: capture constraints are identical in both modes. Requesting a
-   * "raw" stream (noise suppression / echo cancellation off) reconfigures the
-   * shared microphone session on mobile and starves the platform speech
-   * recognizer — high mode used to kill live transcription entirely because
-   * of this. All boosting therefore happens in our own WebAudio graph, which
-   * cannot affect the recognizer's feed.
-   */
-  async start(highSensitivity = false): Promise<void> {
-    // The 4× boost happens upstream of the analyser in high mode, so the
-    // gate/meter see an already-amplified signal.
-    this.energyGate = highSensitivity ? FAR_FIELD_ENERGY_GATE : DEFAULT_ENERGY_GATE
-    this.levelScale = highSensitivity ? 8 : 8
+  async start(): Promise<void> {
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     })
@@ -63,27 +64,21 @@ export class MicFeatureCapture {
     const source = this.context.createMediaStreamSource(this.stream)
     this.analyser = this.context.createAnalyser()
     this.analyser.fftSize = 2048
-    if (highSensitivity) {
-      // Amplify before analysis/recording: 4× gain lifts distant voices, and
-      // a compressor acting as a soft limiter stops nearby speech from
-      // clipping. The pitch tracker, level meter, and the session recording
-      // all read the boosted signal.
-      const gain = this.context.createGain()
-      gain.gain.value = 4
-      const limiter = this.context.createDynamicsCompressor()
-      limiter.threshold.value = -12
-      limiter.knee.value = 10
-      limiter.ratio.value = 8
-      limiter.attack.value = 0.004
-      limiter.release.value = 0.2
-      this.boostedOut = this.context.createMediaStreamDestination()
-      source.connect(gain)
-      gain.connect(limiter)
-      limiter.connect(this.analyser)
-      limiter.connect(this.boostedOut)
-    } else {
-      source.connect(this.analyser)
-    }
+
+    this.gainNode = this.context.createGain()
+    this.gainNode.gain.value = MIN_GAIN
+    const limiter = this.context.createDynamicsCompressor()
+    limiter.threshold.value = -12
+    limiter.knee.value = 10
+    limiter.ratio.value = 8
+    limiter.attack.value = 0.004
+    limiter.release.value = 0.2
+    this.boostedOut = this.context.createMediaStreamDestination()
+    source.connect(this.gainNode)
+    this.gainNode.connect(limiter)
+    limiter.connect(this.analyser)
+    limiter.connect(this.boostedOut)
+
     this.startedAt = performance.now()
     this.scheduleNext()
 
@@ -117,9 +112,23 @@ export class MicFeatureCapture {
   private captureFrame(): void {
     if (!this.analyser || !this.context) return
     this.analyser.getFloatTimeDomainData(this.buffer)
+
+    // Adapt gain from the post-gain energy: quiet speech ramps the boost up,
+    // loud speech brings it back down. Silence leaves it untouched.
+    let sumSquares = 0
+    for (let i = 0; i < this.buffer.length; i++) {
+      sumSquares += this.buffer[i] * this.buffer[i]
+    }
+    const energy = Math.sqrt(sumSquares / this.buffer.length)
+    if (energy > ADAPT_FLOOR && this.gainNode) {
+      const ratio = TARGET_SPEECH_RMS / energy
+      const step = Math.min(Math.max(ratio, 1 - ADAPT_STEP), 1 + ADAPT_STEP)
+      this.gainNode.gain.value = Math.min(MAX_GAIN, Math.max(MIN_GAIN, this.gainNode.gain.value * step))
+    }
+
     const time = (performance.now() - this.startedAt) / 1000
-    const frame = analyzeFrame(this.buffer, this.context.sampleRate, time, this.energyGate)
-    this.level = frame ? Math.min(1, frame.energy * this.levelScale) : 0
+    const frame = analyzeFrame(this.buffer, this.context.sampleRate, time, FAR_FIELD_ENERGY_GATE)
+    this.level = frame ? Math.min(1, frame.energy * 5) : 0
     if (frame) {
       this.frames.push(frame)
       // Bound memory if no utterance boundary arrives for a long time.
@@ -147,6 +156,7 @@ export class MicFeatureCapture {
     this.context = null
     this.stream = null
     this.analyser = null
+    this.gainNode = null
     this.boostedOut = null
     this.frames = []
     this.level = 0
