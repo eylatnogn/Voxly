@@ -16,7 +16,7 @@
  */
 
 /** Only the last N interim words remain open to revision. */
-export const MUTABLE_TAIL_WORDS = 2
+export const MUTABLE_TAIL_WORDS = 1
 
 export class GreedyCaption {
   private locked: string[] = []
@@ -36,15 +36,22 @@ export class GreedyCaption {
   }
 
   /**
-   * The recognizer finalized a phrase: keep its version only if it is at
-   * least as complete as what was already captured.
+   * The recognizer finalized a phrase. Displayed words are never rewritten:
+   * the final's "corrections" contribute only the words it has BEYOND what
+   * was already captured. A final that dropped words loses entirely.
    */
   finalize(finalText: string): string {
     const finalWords = finalText.trim().split(/\s+/).filter(Boolean)
-    const chosen =
-      finalWords.length >= this.locked.length ? finalWords.join(' ') : this.locked.join(' ')
+    let words: string[]
+    if (this.locked.length === 0) {
+      words = finalWords // nothing was shown yet — take the final as-is
+    } else if (finalWords.length > this.locked.length) {
+      words = [...this.locked, ...finalWords.slice(this.locked.length)]
+    } else {
+      words = this.locked
+    }
     this.locked = []
-    return chosen
+    return words.join(' ')
   }
 
   reset(): void {
