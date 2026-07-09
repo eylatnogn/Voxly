@@ -9,7 +9,10 @@ export function SpeakerLegend() {
   return (
     <div className="panel speaker-legend">
       <h2>Speakers</h2>
-      <p className="hint">Detected from voice pitch &amp; tone. Click a name to edit it.</p>
+      <p className="hint">
+        Live: tagged by pitch &amp; tone. Refined transcripts use neural voice fingerprints for
+        higher accuracy. Click a name to edit it.
+      </p>
       <ul>
         {speakers.map((speaker) => (
           <li key={speaker.id} className="speaker-row">
