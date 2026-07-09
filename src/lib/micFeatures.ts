@@ -40,32 +40,36 @@ export class MicFeatureCapture {
   }
 
   /**
-   * @param highSensitivity Far-field mode for picking up distant voices:
-   * disables the browser's noise suppression and echo cancellation (both are
-   * tuned for close-talking and suppress quiet distant speech as "noise"),
-   * keeps auto-gain boosting the signal, and lowers the analysis energy gate.
+   * @param highSensitivity Far-field mode for picking up distant voices: a
+   * 4× amplifier + soft limiter boosts the signal for voice analysis and the
+   * session recording, and the analysis energy gate drops.
+   *
+   * IMPORTANT: capture constraints are identical in both modes. Requesting a
+   * "raw" stream (noise suppression / echo cancellation off) reconfigures the
+   * shared microphone session on mobile and starves the platform speech
+   * recognizer — high mode used to kill live transcription entirely because
+   * of this. All boosting therefore happens in our own WebAudio graph, which
+   * cannot affect the recognizer's feed.
    */
   async start(highSensitivity = false): Promise<void> {
-    // The 2.5× boost happens upstream of the analyser in high mode, so the
+    // The 4× boost happens upstream of the analyser in high mode, so the
     // gate/meter see an already-amplified signal.
     this.energyGate = highSensitivity ? FAR_FIELD_ENERGY_GATE : DEFAULT_ENERGY_GATE
-    this.levelScale = highSensitivity ? 10 : 8
+    this.levelScale = highSensitivity ? 8 : 8
     this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: highSensitivity
-        ? { echoCancellation: false, noiseSuppression: false, autoGainControl: true }
-        : { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     })
     this.context = new AudioContext()
     const source = this.context.createMediaStreamSource(this.stream)
     this.analyser = this.context.createAnalyser()
     this.analyser.fftSize = 2048
     if (highSensitivity) {
-      // Amplify before analysis/recording: 2.5× gain lifts distant voices,
-      // and a compressor acting as a soft limiter stops nearby speech from
+      // Amplify before analysis/recording: 4× gain lifts distant voices, and
+      // a compressor acting as a soft limiter stops nearby speech from
       // clipping. The pitch tracker, level meter, and the session recording
       // all read the boosted signal.
       const gain = this.context.createGain()
-      gain.gain.value = 2.5
+      gain.gain.value = 4
       const limiter = this.context.createDynamicsCompressor()
       limiter.threshold.value = -12
       limiter.knee.value = 10

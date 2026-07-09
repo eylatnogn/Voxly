@@ -143,7 +143,7 @@ export function RecorderPanel() {
           value={highSensitivity ? 'high' : 'standard'}
           onChange={(e) => changeSensitivity(e.target.value === 'high')}
           disabled={mode !== 'idle'}
-          title="High pickup disables noise suppression so quiet, distant voices aren't filtered out — best for a phone on the meeting-room table"
+          title="High pickup amplifies the mic 4× for speaker analysis and the refine recording — best for a phone on the meeting-room table. Live captions are unaffected; use Refine after stopping for the full benefit."
         >
           <option value="standard">Standard (close-up)</option>
           <option value="high">High (room / distance)</option>
