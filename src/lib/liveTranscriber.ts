@@ -44,8 +44,8 @@ export function isLiveTranscriptionSupported(): boolean {
 }
 
 /** Force a restart if the recognizer goes completely silent for this long. */
-const STALL_TIMEOUT_MS = 15000
-const WATCHDOG_INTERVAL_MS = 10000
+const STALL_TIMEOUT_MS = 10000
+const WATCHDOG_INTERVAL_MS = 5000
 
 export class LiveTranscriber {
   private recognition: SpeechRecognitionLike | null = null
@@ -96,10 +96,12 @@ export class LiveTranscriber {
       }
     }
     recognition.onend = () => {
-      // Chrome ends recognition after silence or errors; restart promptly
-      // while the session is live. The small delay avoids the "already
-      // started" race right after an automatic end.
+      // Chrome ends recognition after silence gaps or errors. Words that were
+      // only interim at that moment would be silently dropped — promote them
+      // into the transcript before restarting, and restart quickly so the
+      // dead window between sessions stays as small as possible.
       if (!this.running) return
+      this.promoteInterim()
       window.setTimeout(() => {
         if (!this.running) return
         try {
@@ -107,7 +109,7 @@ export class LiveTranscriber {
         } catch {
           /* already started */
         }
-      }, 100)
+      }, 50)
     }
 
     this.recognition = recognition
@@ -139,30 +141,7 @@ export class LiveTranscriber {
       if (!text) continue
 
       if (result.isFinal) {
-        const frames = this.mic.drainFrames()
-        const match = this.tagger.classify(frames)
-        // Clusters that turned out to be the same voice get folded together —
-        // retag everything already attributed to the absorbed speaker.
-        for (const merge of this.tagger.drainMerges()) {
-          store.remapSpeaker(merge.from, merge.to)
-          if (this.lastSpeakerId === merge.from) this.lastSpeakerId = merge.to
-        }
-        const speakerId = match ? match.speakerId : this.lastSpeakerId
-        if (match) {
-          store.ensureSpeaker(match.speakerId, match.medianPitchHz)
-          this.lastSpeakerId = match.speakerId
-        }
-        const now = this.mic.elapsedSeconds()
-        const segment: TranscriptSegment = {
-          id: `live-${this.segmentCounter++}`,
-          speakerId,
-          text: capitalize(text),
-          startTime: this.currentSegmentStart,
-          endTime: now,
-        }
-        this.currentSegmentStart = now
-        store.upsertSegment(segment)
-        this.removeInterim()
+        this.finalizeUtterance(text)
       } else {
         interimText += `${text} `
       }
@@ -180,6 +159,44 @@ export class LiveTranscriber {
     }
   }
 
+  /** Commit one utterance to the transcript with a speaker classification. */
+  private finalizeUtterance(text: string): void {
+    const trimmed = text.trim()
+    if (!trimmed) return
+    const store = useVoxlyStore.getState()
+    const frames = this.mic.drainFrames()
+    const match = this.tagger.classify(frames)
+    // Clusters that turned out to be the same voice get folded together —
+    // retag everything already attributed to the absorbed speaker.
+    for (const merge of this.tagger.drainMerges()) {
+      store.remapSpeaker(merge.from, merge.to)
+      if (this.lastSpeakerId === merge.from) this.lastSpeakerId = merge.to
+    }
+    const speakerId = match ? match.speakerId : this.lastSpeakerId
+    if (match) {
+      store.ensureSpeaker(match.speakerId, match.medianPitchHz)
+      this.lastSpeakerId = match.speakerId
+    }
+    const now = this.mic.elapsedSeconds()
+    const segment: TranscriptSegment = {
+      id: `live-${this.segmentCounter++}`,
+      speakerId,
+      text: capitalize(trimmed),
+      startTime: this.currentSegmentStart,
+      endTime: now,
+    }
+    this.currentSegmentStart = now
+    store.upsertSegment(segment)
+    this.removeInterim()
+  }
+
+  /** Rescue words that were still interim when recognition ended. */
+  private promoteInterim(): void {
+    const store = useVoxlyStore.getState()
+    const interim = store.segments.find((s) => s.id === 'live-interim')
+    if (interim?.text.trim()) this.finalizeUtterance(interim.text)
+  }
+
   private removeInterim(): void {
     const store = useVoxlyStore.getState()
     store.replaceSegments(store.segments.filter((s) => s.id !== 'live-interim'))
@@ -193,7 +210,7 @@ export class LiveTranscriber {
    * tagging.
    */
   private startRecorder(): void {
-    const stream = this.mic.mediaStream
+    const stream = this.mic.recordingStream
     if (!stream || typeof MediaRecorder === 'undefined') return
     try {
       this.recordedChunks = []
@@ -227,6 +244,9 @@ export class LiveTranscriber {
     }
     this.recognition?.stop()
     this.recognition = null
+    // Whatever was being said when the user hit stop belongs in the
+    // transcript, not the bin.
+    this.promoteInterim()
     this.stopRecorder()
     this.mic.stop()
     this.removeInterim()
