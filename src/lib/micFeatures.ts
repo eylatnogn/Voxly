@@ -26,7 +26,7 @@ import { currentDutyCycle } from './power'
 /** Adaptive gain aims for this RMS on voiced audio. */
 const TARGET_SPEECH_RMS = 0.18
 const MIN_GAIN = 1
-const MAX_GAIN = 8
+const MAX_GAIN = 10
 /** Ignore post-gain energy below this when adapting (true silence). */
 const ADAPT_FLOOR = 0.001
 /** Max multiplicative gain change per analysis frame — smooth, no pumping. */

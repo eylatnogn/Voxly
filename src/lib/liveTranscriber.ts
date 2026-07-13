@@ -66,7 +66,7 @@ const VOICE_LEVEL_THRESHOLD = 0.06
 /** Voice present but no recognizer events for this long → fallback captions. */
 const FALLBACK_AFTER_MS = 12000
 /** Fallback chunk length; also the fallback caption latency. */
-const FALLBACK_CHUNK_SECONDS = 10
+const FALLBACK_CHUNK_SECONDS = 6
 
 export class LiveTranscriber {
   private recognition: SpeechRecognitionLike | null = null
@@ -368,7 +368,14 @@ export class LiveTranscriber {
     if (!stream || typeof MediaRecorder === 'undefined') return
     try {
       this.recordedChunks = []
-      const recorder = new MediaRecorder(stream)
+      // 128 kbps Opus: the browser default (~32-48 kbps) audibly degrades
+      // consonants, which is exactly what Whisper needs to hear.
+      let recorder: MediaRecorder
+      try {
+        recorder = new MediaRecorder(stream, { audioBitsPerSecond: 128000 })
+      } catch {
+        recorder = new MediaRecorder(stream)
+      }
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) this.recordedChunks.push(event.data)
       }
