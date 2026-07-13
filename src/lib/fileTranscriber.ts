@@ -1,10 +1,14 @@
 import {
+  adaptiveClusterEmbeddings,
+  assignWordSpeakers,
+  buildEmbeddingWindows,
   buildVoicedRegions,
   chunksToSegments,
-  clusterEmbeddings,
+  groupWordsBySpeaker,
+  smoothLabels,
   wordsToSegments,
+  type EmbedWindow,
   type TimedWord,
-  type VoicedRegion,
 } from './diarization'
 import { analyzeFrame, type VoiceFrame } from './pitch'
 import { SpeakerTagger } from './speakerTagger'
@@ -59,44 +63,7 @@ export async function transcribeFile(file: File): Promise<void> {
 
   useVoxlyStore.getState().setFileProgress(null, 'Identifying speakers…')
 
-  // Voice features over the whole recording, grouped into voiced regions.
-  // Pitch clustering provides speaker ids as the fallback…
   const frames = extractFrames(pcm, WHISPER_SAMPLE_RATE, 0, duration)
-  const tagger = new SpeakerTagger()
-  const regions = buildVoicedRegions(frames, tagger)
-
-  // …and neural voice fingerprints override them when available: an x-vector
-  // embedding per region, clustered by cosine similarity — far more accurate
-  // between genuinely different voices than pitch alone.
-  const vectors = await runEmbeddings(worker, pcm, regions)
-  worker.terminate()
-  if (vectors) {
-    const clusterIds = clusterEmbeddings(vectors)
-    let lastId = -1
-    for (let i = 0; i < regions.length; i++) {
-      if (clusterIds[i] >= 0) {
-        regions[i].speakerId = clusterIds[i]
-        lastId = clusterIds[i]
-      } else {
-        // Region too short to fingerprint — assume the surrounding speaker.
-        regions[i].speakerId = lastId
-      }
-    }
-  }
-
-  // Register speakers with a representative pitch hint per cluster.
-  const pitchByCluster = new Map<number, number[]>()
-  for (const region of regions) {
-    if (region.speakerId >= 0 && region.medianPitchHz > 0) {
-      const list = pitchByCluster.get(region.speakerId) ?? []
-      list.push(region.medianPitchHz)
-      pitchByCluster.set(region.speakerId, list)
-    }
-  }
-  for (const [speakerId, pitches] of pitchByCluster) {
-    const sorted = pitches.slice().sort((a, b) => a - b)
-    useVoxlyStore.getState().ensureSpeaker(speakerId, sorted[Math.floor(sorted.length / 2)])
-  }
 
   const timed = result.chunks
     .map((chunk) => ({
@@ -106,10 +73,44 @@ export async function transcribeFile(file: File): Promise<void> {
     }))
     .filter((c): c is TimedWord => c.text.trim().length > 0)
 
-  const segments =
+  // Accurate path: sliding-window voice fingerprints + adaptive clustering.
+  const windows = buildEmbeddingWindows(frames)
+  const vectors =
+    windows.length >= 2
+      ? await runEmbeddings(
+          worker,
+          pcm,
+          windows.map((w, index) => ({ index, start: w.start, end: w.end })),
+          windows.length,
+        )
+      : null
+  worker.terminate()
+
+  let segments
+  if (
+    vectors &&
+    vectors.filter((v) => v !== null).length >= 2 &&
     result.granularity === 'word'
-      ? wordsToSegments(timed, regions)
-      : chunksToSegments(timed, regions)
+  ) {
+    const labels = smoothLabels(adaptiveClusterEmbeddings(vectors))
+    const wordSpeakers = assignWordSpeakers(timed, windows, labels)
+    segments = groupWordsBySpeaker(timed, wordSpeakers)
+    registerSpeakers(frames, windows, labels)
+  } else {
+    // Fallback path: pitch-based regions (embedding model unavailable or no
+    // word timestamps).
+    const tagger = new SpeakerTagger()
+    const regions = buildVoicedRegions(frames, tagger)
+    for (const region of regions) {
+      if (region.speakerId >= 0 && region.medianPitchHz > 0) {
+        useVoxlyStore.getState().ensureSpeaker(region.speakerId, region.medianPitchHz)
+      }
+    }
+    segments =
+      result.granularity === 'word'
+        ? wordsToSegments(timed, regions)
+        : chunksToSegments(timed, regions)
+  }
 
   useVoxlyStore.getState().replaceSegments(segments)
   useVoxlyStore.getState().setFileProgress(null, null)
@@ -206,29 +207,47 @@ function runWhisper(worker: Worker, pcm: Float32Array): Promise<WhisperResult | 
   })
 }
 
+/** Register discovered speakers with a representative pitch hint each. */
+function registerSpeakers(
+  frames: ReturnType<typeof extractFrames>,
+  windows: EmbedWindow[],
+  labels: number[],
+): void {
+  const pitchByLabel = new Map<number, number[]>()
+  for (const frame of frames) {
+    if (frame.pitchHz <= 0) continue
+    for (let w = 0; w < windows.length; w++) {
+      if (labels[w] >= 0 && frame.time >= windows[w].start && frame.time <= windows[w].end) {
+        const list = pitchByLabel.get(labels[w]) ?? []
+        list.push(frame.pitchHz)
+        pitchByLabel.set(labels[w], list)
+        break
+      }
+    }
+  }
+  const allLabels = new Set(labels.filter((l) => l >= 0))
+  for (const label of allLabels) {
+    const pitches = (pitchByLabel.get(label) ?? []).sort((a, b) => a - b)
+    useVoxlyStore
+      .getState()
+      .ensureSpeaker(label, pitches.length > 0 ? pitches[Math.floor(pitches.length / 2)] : 0)
+  }
+}
+
 /**
- * Fingerprint the voiced regions with the speaker-verification model. Long
- * meetings are capped at the 150 longest regions (shorter ones inherit their
- * neighbor's speaker) to bound inference time. Returns null when the model
- * can't load — pitch clustering remains in effect.
+ * Fingerprint time windows with the speaker-verification model. Returns null
+ * when the model can't load — pitch clustering remains in effect.
  */
 function runEmbeddings(
   worker: Worker,
   pcm: Float32Array,
-  regions: VoicedRegion[],
+  regions: Array<{ index: number; start: number; end: number }>,
+  totalSlots: number,
 ): Promise<Array<number[] | null> | null> {
-  const eligible = regions
-    .map((region, index) => ({ index, start: region.start, end: region.end }))
-    .filter((r) => r.end - r.start >= 0.8)
-  if (eligible.length === 0) return Promise.resolve(null)
-  const capped = eligible
-    .slice()
-    .sort((a, b) => b.end - b.start - (a.end - a.start))
-    .slice(0, 150)
-    .sort((a, b) => a.index - b.index)
+  if (regions.length === 0) return Promise.resolve(null)
 
   return new Promise((resolve) => {
-    const timeout = window.setTimeout(() => resolve(null), 180000)
+    const timeout = window.setTimeout(() => resolve(null), 300000)
     worker.onmessage = (event: MessageEvent) => {
       const msg = event.data as
         | { type: 'status'; message: string }
@@ -241,7 +260,7 @@ function runEmbeddings(
           break
         case 'embeddings': {
           clearTimeout(timeout)
-          const vectors: Array<number[] | null> = regions.map(() => null)
+          const vectors: Array<number[] | null> = new Array(totalSlots).fill(null)
           for (const { index, vector } of msg.vectors) vectors[index] = vector
           resolve(vectors)
           break
@@ -259,7 +278,7 @@ function runEmbeddings(
       resolve(null)
     }
     const audio = pcm.slice()
-    worker.postMessage({ type: 'embed', audio, regions: capped }, [audio.buffer])
+    worker.postMessage({ type: 'embed', audio, regions }, [audio.buffer])
   })
 }
 

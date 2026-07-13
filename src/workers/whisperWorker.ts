@@ -52,6 +52,11 @@ interface TranscribeRequest {
    * chunk, no timestamps, no chunking overhead.
    */
   quick?: boolean
+  /**
+   * 'base' (default for full transcriptions) roughly halves the word error
+   * rate vs 'tiny'; 'tiny' stays for live fallback chunks where latency wins.
+   */
+  model?: 'tiny' | 'base'
 }
 
 interface ChunkResult {
@@ -61,25 +66,73 @@ interface ChunkResult {
 
 type Transcriber = (audio: Float32Array, options?: Record<string, unknown>) => Promise<unknown>
 
-// The pipeline is cached so a long-lived worker (live fallback captions)
-// loads the model once and reuses it for every chunk.
-let transcriberPromise: Promise<Transcriber> | null = null
+const MODEL_IDS = {
+  tiny: 'onnx-community/whisper-tiny.en',
+  base: 'onnx-community/whisper-base.en',
+} as const
 
-function getTranscriber(): Promise<Transcriber> {
-  if (!transcriberPromise) {
-    transcriberPromise = (async () => {
+const progressCallback = (p: { status?: string; progress?: number }) => {
+  if (p.status === 'progress' && typeof p.progress === 'number') {
+    post({ type: 'progress', progress: Math.round(p.progress) })
+  }
+}
+
+// Pipelines are cached per model so a long-lived worker loads each once.
+// WebGPU is tried first (order-of-magnitude faster where available) and the
+// worker silently falls back to WASM if it fails to init OR to run.
+const transcriberCache = new Map<string, Promise<Transcriber>>()
+const usedWebGpu = new Set<string>()
+
+function getTranscriber(model: 'tiny' | 'base'): Promise<Transcriber> {
+  let cached = transcriberCache.get(model)
+  if (!cached) {
+    cached = (async () => {
       const { pipeline } = await loadTransformers()
-      return pipeline('automatic-speech-recognition', 'onnx-community/whisper-tiny.en', {
+      const hasWebGpu = 'gpu' in navigator
+      if (hasWebGpu) {
+        try {
+          const t = await pipeline('automatic-speech-recognition', MODEL_IDS[model], {
+            device: 'webgpu',
+            dtype: 'q8',
+            progress_callback: progressCallback,
+          })
+          usedWebGpu.add(model)
+          return t
+        } catch {
+          /* fall through to WASM */
+        }
+      }
+      return pipeline('automatic-speech-recognition', MODEL_IDS[model], {
         dtype: 'q8',
-        progress_callback: (p: { status?: string; progress?: number }) => {
-          if (p.status === 'progress' && typeof p.progress === 'number') {
-            post({ type: 'progress', progress: Math.round(p.progress) })
-          }
-        },
+        progress_callback: progressCallback,
       })
     })()
+    transcriberCache.set(model, cached)
   }
-  return transcriberPromise
+  return cached
+}
+
+/** Run inference; if a WebGPU pipeline dies mid-run, rebuild on WASM once. */
+async function transcribeWith(
+  model: 'tiny' | 'base',
+  audio: Float32Array,
+  options?: Record<string, unknown>,
+): Promise<unknown> {
+  try {
+    const transcriber = await getTranscriber(model)
+    return await transcriber(audio, options)
+  } catch (error) {
+    if (!usedWebGpu.has(model)) throw error
+    usedWebGpu.delete(model)
+    transcriberCache.delete(model)
+    const { pipeline } = await loadTransformers()
+    const wasm = pipeline('automatic-speech-recognition', MODEL_IDS[model], {
+      dtype: 'q8',
+      progress_callback: progressCallback,
+    }) as Promise<Transcriber>
+    transcriberCache.set(model, wasm)
+    return (await wasm)(audio, options)
+  }
 }
 
 interface EmbedRequest {
@@ -148,10 +201,10 @@ self.onmessage = async (event: MessageEvent<TranscribeRequest | EmbedRequest>) =
   if (event.data.type !== 'transcribe') return
   try {
     post({ type: 'status', message: 'Loading speech model…' })
-    const transcriber = await getTranscriber()
+    const model = event.data.model ?? (event.data.quick ? 'tiny' : 'base')
 
     if (event.data.quick) {
-      const output = (await transcriber(event.data.audio)) as { text: string }
+      const output = (await transcribeWith(model, event.data.audio)) as { text: string }
       post({ type: 'result', chunks: [{ text: output.text, timestamp: [0, null] }], granularity: 'chunk' })
       return
     }
@@ -162,14 +215,14 @@ self.onmessage = async (event: MessageEvent<TranscribeRequest | EmbedRequest>) =
     let output: { text: string; chunks?: ChunkResult[] }
     let granularity: 'word' | 'chunk' = 'word'
     try {
-      output = (await transcriber(event.data.audio, {
+      output = (await transcribeWith(model, event.data.audio, {
         chunk_length_s: 30,
         stride_length_s: 5,
         return_timestamps: 'word',
       })) as typeof output
     } catch {
       granularity = 'chunk'
-      output = (await transcriber(event.data.audio, {
+      output = (await transcribeWith(model, event.data.audio, {
         chunk_length_s: 30,
         stride_length_s: 5,
         return_timestamps: true,

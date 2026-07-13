@@ -211,6 +211,303 @@ function absorbSingleWordFlips(ids: number[]): void {
   }
 }
 
+// ─── Sliding-window neural diarization ──────────────────────────────────
+//
+// The accurate pipeline (used for refined/uploaded transcripts):
+//  1. Uniform ~2.4 s windows slide over SPEECH ONLY (silence skipped), so a
+//     window rarely mixes two speakers the way variable-length regions did.
+//  2. Each window gets an x-vector voice fingerprint (computed in the
+//     worker); windows are capped adaptively so long meetings stay tractable.
+//  3. Windows are clustered with an ADAPTIVE threshold learned from this
+//     audio's own similarity distribution (2-means split of pairwise
+//     similarities) instead of a fixed constant.
+//  4. Labels are temporally smoothed, then refined by one reassignment pass
+//     against cluster centroids.
+//  5. Words are attributed by overlap-weighted vote over windows.
+
+export interface EmbedWindow {
+  start: number
+  end: number
+}
+
+const WINDOW_SECONDS = 2.4
+const MIN_WINDOW_SECONDS = 1.0
+/** Cap on fingerprint inferences per file — hop stretches on long meetings. */
+const MAX_WINDOWS = 400
+
+/** Slide fixed windows across speech (frames mark speech; gaps are skipped). */
+export function buildEmbeddingWindows(
+  frames: VoiceFrame[],
+  maxWindows: number = MAX_WINDOWS,
+): EmbedWindow[] {
+  if (frames.length === 0) return []
+  // Group frames into speech spans separated by >0.6 s of silence.
+  const spans: Array<{ start: number; end: number }> = []
+  let spanStart = frames[0].time
+  let last = frames[0].time
+  for (const frame of frames) {
+    if (frame.time - last > 0.6) {
+      spans.push({ start: spanStart, end: last + 0.25 })
+      spanStart = frame.time
+    }
+    last = frame.time
+  }
+  spans.push({ start: spanStart, end: last + 0.25 })
+
+  const totalSpeech = spans.reduce((sum, s) => sum + (s.end - s.start), 0)
+  const hop = Math.max(1.2, totalSpeech / maxWindows)
+
+  const windows: EmbedWindow[] = []
+  for (const span of spans) {
+    for (let t = span.start; t < span.end; t += hop) {
+      const end = Math.min(t + WINDOW_SECONDS, span.end)
+      if (end - t >= MIN_WINDOW_SECONDS) windows.push({ start: t, end })
+      if (end >= span.end) break
+    }
+    // Short spans still deserve one window if they're long enough.
+    if (
+      windows.length === 0 ||
+      (windows[windows.length - 1].end <= span.start && span.end - span.start >= MIN_WINDOW_SECONDS)
+    ) {
+      windows.push({ start: span.start, end: span.end })
+    }
+  }
+  return windows.slice(0, maxWindows)
+}
+
+/**
+ * Cluster window fingerprints with a threshold learned from the data: the
+ * pairwise cosine similarities split into "same speaker" and "different
+ * speaker" modes; a 1-D 2-means finds the split point. If the two modes are
+ * indistinguishable, the audio is a single speaker.
+ */
+export function adaptiveClusterEmbeddings(
+  vectors: Array<number[] | null>,
+  maxSpeakers = 8,
+): number[] {
+  const present = vectors
+    .map((v, i) => ({ v, i }))
+    .filter((x): x is { v: number[]; i: number } => x.v !== null && x.v.length > 0)
+  const ids = new Array<number>(vectors.length).fill(-1)
+  if (present.length === 0) return ids
+  if (present.length === 1) {
+    ids[present[0].i] = 0
+    return ids
+  }
+
+  const normed = present.map((p) => normalize(p.v))
+  const sims: number[] = []
+  for (let a = 0; a < normed.length; a++) {
+    for (let b = a + 1; b < normed.length; b++) sims.push(dot(normed[a], normed[b]))
+  }
+
+  // 1-D 2-means on similarities → adaptive same/different threshold.
+  let lo = Math.min(...sims)
+  let hi = Math.max(...sims)
+  for (let iter = 0; iter < 20; iter++) {
+    let loSum = 0
+    let loN = 0
+    let hiSum = 0
+    let hiN = 0
+    const mid = (lo + hi) / 2
+    for (const s of sims) {
+      if (s < mid) {
+        loSum += s
+        loN++
+      } else {
+        hiSum += s
+        hiN++
+      }
+    }
+    if (loN === 0 || hiN === 0) break
+    lo = loSum / loN
+    hi = hiSum / hiN
+  }
+  // Modes too close together → one voice throughout.
+  if (hi - lo < 0.08) {
+    for (const p of present) ids[p.i] = 0
+    return ids
+  }
+  const threshold = Math.min(0.8, Math.max(0.45, (lo + hi) / 2))
+
+  const labels = agglomerate(normed, threshold, maxSpeakers)
+  present.forEach((p, k) => {
+    ids[p.i] = labels[k]
+  })
+  return ids
+}
+
+function agglomerate(normed: number[][], threshold: number, maxSpeakers: number): number[] {
+  interface Cluster {
+    indices: number[]
+    centroid: number[]
+  }
+  const clusters: Cluster[] = normed.map((v, i) => ({ indices: [i], centroid: v }))
+
+  const mergeClosest = (minSim: number): boolean => {
+    let bestA = -1
+    let bestB = -1
+    let bestSim = minSim
+    for (let a = 0; a < clusters.length; a++) {
+      for (let b = a + 1; b < clusters.length; b++) {
+        const sim = dot(clusters[a].centroid, clusters[b].centroid)
+        if (sim >= bestSim) {
+          bestSim = sim
+          bestA = a
+          bestB = b
+        }
+      }
+    }
+    if (bestA === -1) return false
+    const [a, b] = [clusters[bestA], clusters[bestB]]
+    const total = a.indices.length + b.indices.length
+    a.centroid = normalize(
+      a.centroid.map((v, i) => (v * a.indices.length + b.centroid[i] * b.indices.length) / total),
+    )
+    a.indices = a.indices.concat(b.indices)
+    clusters.splice(bestB, 1)
+    return true
+  }
+
+  while (clusters.length > 1 && mergeClosest(threshold)) {
+    /* merge until nothing is similar enough */
+  }
+  // Tiny clusters are diarization noise — absorb into the nearest big one.
+  for (let c = clusters.length - 1; c >= 0 && clusters.length > 1; c--) {
+    if (clusters[c].indices.length >= 3) continue
+    let best = -1
+    let bestSim = -Infinity
+    for (let o = 0; o < clusters.length; o++) {
+      if (o === c) continue
+      const sim = dot(clusters[c].centroid, clusters[o].centroid)
+      if (sim > bestSim) {
+        bestSim = sim
+        best = o
+      }
+    }
+    if (best !== -1) {
+      clusters[best].indices = clusters[best].indices.concat(clusters[c].indices)
+      clusters.splice(c, 1)
+    }
+  }
+  while (clusters.length > maxSpeakers && mergeClosest(-1)) {
+    /* forced merges over the cap */
+  }
+
+  clusters.sort((a, b) => Math.min(...a.indices) - Math.min(...b.indices))
+  const labels = new Array<number>(normed.length).fill(0)
+  clusters.forEach((cluster, id) => {
+    for (const index of cluster.indices) labels[index] = id
+  })
+
+  // Refinement pass: reassign every window to its nearest cluster centroid.
+  const centroids = clusters.map((c) =>
+    normalize(
+      c.indices
+        .reduce(
+          (acc, i) => acc.map((v, d) => v + normed[i][d]),
+          new Array<number>(normed[0].length).fill(0),
+        )
+        .map((v) => v / c.indices.length),
+    ),
+  )
+  for (let i = 0; i < normed.length; i++) {
+    let best = labels[i]
+    let bestSim = -Infinity
+    for (let c = 0; c < centroids.length; c++) {
+      const sim = dot(normed[i], centroids[c])
+      if (sim > bestSim) {
+        bestSim = sim
+        best = c
+      }
+    }
+    labels[i] = best
+  }
+  return labels
+}
+
+/** Median-of-three smoothing: a lone window flip between two windows of the
+ * same speaker is noise, not a one-window interjection. */
+export function smoothLabels(labels: number[]): number[] {
+  const out = labels.slice()
+  for (let i = 1; i < out.length - 1; i++) {
+    if (out[i] !== out[i - 1] && out[i] !== out[i + 1] && out[i - 1] === out[i + 1]) {
+      out[i] = out[i - 1]
+    }
+  }
+  return out
+}
+
+/** Attribute each word by overlap-weighted vote across windows. */
+export function assignWordSpeakers(
+  words: TimedWord[],
+  windows: EmbedWindow[],
+  labels: number[],
+): number[] {
+  const ids = words.map((word) => {
+    const votes = new Map<number, number>()
+    const start = word.start - 0.15
+    const end = word.end + 0.15
+    for (let w = 0; w < windows.length; w++) {
+      if (labels[w] < 0) continue
+      const overlap = Math.min(end, windows[w].end) - Math.max(start, windows[w].start)
+      if (overlap > 0) votes.set(labels[w], (votes.get(labels[w]) ?? 0) + overlap)
+    }
+    let best = -1
+    let bestVote = 0
+    for (const [label, vote] of votes) {
+      if (vote > bestVote) {
+        bestVote = vote
+        best = label
+      }
+    }
+    return best
+  })
+  for (let i = 0; i < ids.length; i++) {
+    if (ids[i] === -1 && i > 0) ids[i] = ids[i - 1]
+  }
+  return ids
+}
+
+/** Group speaker-attributed words into transcript segments. */
+export function groupWordsBySpeaker(
+  words: TimedWord[],
+  speakerIds: number[],
+): TranscriptSegment[] {
+  const ids = speakerIds.slice()
+  absorbSingleWordFlips(ids)
+  const segments: TranscriptSegment[] = []
+  let bucket: TimedWord[] = []
+  let bucketSpeaker = ids[0] ?? -1
+
+  const flush = () => {
+    if (bucket.length === 0) return
+    segments.push({
+      id: `file-${segments.length}`,
+      speakerId: bucketSpeaker,
+      text: bucket.map((w) => w.text).join(' ').replace(/ {2,}/g, ' ').trim(),
+      startTime: bucket[0].start,
+      endTime: bucket[bucket.length - 1].end,
+    })
+    bucket = []
+  }
+
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i]
+    const pause = bucket.length > 0 ? word.start - bucket[bucket.length - 1].end : 0
+    if (
+      bucket.length > 0 &&
+      (ids[i] !== bucketSpeaker || pause > SEGMENT_PAUSE_BREAK_SEC || bucket.length >= SEGMENT_MAX_WORDS)
+    ) {
+      flush()
+    }
+    if (bucket.length === 0) bucketSpeaker = ids[i]
+    bucket.push(word)
+  }
+  flush()
+  return segments
+}
+
 /**
  * Cluster neural voice fingerprints (x-vector embeddings) into speakers via
  * average-linkage agglomerative clustering on cosine similarity. Embeddings
