@@ -106,10 +106,19 @@ export class LiveTranscriber {
     return this.fallbackActive ? 'on-device' : 'browser'
   }
 
-  async start(lang: string): Promise<void> {
-    const Ctor = getSpeechRecognition()
+  /** True when transcribing device/tab audio rather than the microphone. */
+  private systemAudio = false
 
-    await this.mic.start()
+  /**
+   * @param externalStream transcribe this stream (tab/system audio) instead
+   * of the microphone. The browser recognizer can only hear the mic, so
+   * these sessions caption entirely with the on-device engine.
+   */
+  async start(lang: string, externalStream?: MediaStream): Promise<void> {
+    const Ctor = getSpeechRecognition()
+    this.systemAudio = Boolean(externalStream)
+
+    await this.mic.start(externalStream)
     this.mic.onTrackEnded = () => this.handleMicRevoked()
     this.tagger.reset()
     this.greedy.reset()
@@ -127,9 +136,9 @@ export class LiveTranscriber {
     void this.acquireWakeLock()
     document.addEventListener('visibilitychange', this.onVisibility)
 
-    if (!Ctor) {
-      // No Web Speech API (Firefox, iOS, …): live captions come entirely from
-      // the on-device engine.
+    if (!Ctor || this.systemAudio) {
+      // No Web Speech API (Firefox, iOS, …) or capturing device audio (the
+      // recognizer can only hear the mic): caption entirely on-device.
       this.activateFallback()
       return
     }
@@ -231,12 +240,13 @@ export class LiveTranscriber {
   private activateFallback(): void {
     if (!this.running || this.fallbackActive) return
     this.fallbackActive = true
-    if (!this.fallbackNoticeShown) {
+    // Expected mode for device-audio sessions — no alarm needed.
+    if (!this.fallbackNoticeShown && !this.systemAudio) {
       this.fallbackNoticeShown = true
       useVoxlyStore
         .getState()
         .setError(
-          'Browser captions went quiet — switched to on-device captions (words appear every ~10 s). The recording is unaffected.',
+          'Browser captions went quiet — switched to on-device captions (words appear every ~6 s). The recording is unaffected.',
         )
     }
     if (!this.fallbackWorker) {
@@ -418,12 +428,18 @@ export class LiveTranscriber {
     if (!document.hidden && this.running) void this.acquireWakeLock()
   }
 
-  /** The OS revoked the microphone (phone call, another app grabbed it). */
+  /** The audio source ended (mic revoked, or the user stopped sharing). */
   private handleMicRevoked(): void {
     if (!this.running) return
+    const wasSystemAudio = this.systemAudio
     this.stop()
     const store = useVoxlyStore.getState()
     store.setMode('idle')
+    if (wasSystemAudio) {
+      // Ending the share is the natural way to finish these sessions —
+      // auto-refine picks the recording up from here.
+      return
+    }
     store.setError(
       'The system took the microphone (a call or another app). Recording stopped — everything captured so far is kept: tap "✨ Refine transcript" to transcribe it.',
     )

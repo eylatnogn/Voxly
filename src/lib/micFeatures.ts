@@ -61,10 +61,17 @@ export class MicFeatureCapture {
     return this.boostedOut?.stream ?? this.stream
   }
 
-  async start(): Promise<void> {
-    this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    })
+  /**
+   * @param externalStream capture this stream (e.g. tab/system audio from
+   * getDisplayMedia) instead of opening the microphone. The rest of the
+   * pipeline — adaptive gain, analysis, recording — is identical.
+   */
+  async start(externalStream?: MediaStream): Promise<void> {
+    this.stream =
+      externalStream ??
+      (await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      }))
     for (const track of this.stream.getAudioTracks()) {
       track.addEventListener('ended', this.handleTrackEnded)
     }

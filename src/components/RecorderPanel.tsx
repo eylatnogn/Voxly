@@ -125,6 +125,42 @@ export function RecorderPanel() {
     }
   }
 
+  const deviceAudioSupported =
+    typeof navigator !== 'undefined' && 'getDisplayMedia' in (navigator.mediaDevices ?? {})
+
+  /**
+   * Transcribe the computer's own audio (a meeting tab, a video, any app
+   * audio the browser can capture) — no microphone involved.
+   */
+  const startDeviceAudio = async () => {
+    let display: MediaStream
+    try {
+      display = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
+    } catch {
+      return // user cancelled the picker
+    }
+    // Only the audio is needed; drop video immediately so nothing heavy runs.
+    display.getVideoTracks().forEach((t) => t.stop())
+    const audioTracks = display.getAudioTracks()
+    if (audioTracks.length === 0) {
+      display.getTracks().forEach((t) => t.stop())
+      setError(
+        'No audio was shared. In the share picker, choose the meeting tab (or entire screen) and turn ON “Share audio”, then try again.',
+      )
+      return
+    }
+    clearSession()
+    const transcriber = new LiveTranscriber()
+    try {
+      await transcriber.start(lang, new MediaStream(audioTracks))
+      transcriberRef.current = transcriber
+      setMode('live')
+    } catch (error) {
+      audioTracks.forEach((t) => t.stop())
+      setError(error instanceof Error ? error.message : 'Could not capture device audio.')
+    }
+  }
+
   const stopLive = () => {
     transcriberRef.current?.stop()
     transcriberRef.current = null
@@ -240,6 +276,28 @@ export function RecorderPanel() {
       )}
 
       <div className="divider">or</div>
+
+      {deviceAudioSupported && (
+        <>
+          <button
+            className="btn btn-secondary"
+            onClick={() => void startDeviceAudio()}
+            disabled={mode !== 'idle'}
+            title="Transcribe a meeting or video playing on this computer — pick its tab (or entire screen) and enable “Share audio”. Captions are on-device (~6 s); the full transcript arrives on stop."
+          >
+            🖥 Capture device audio
+          </button>
+          <p className="hint">
+            Transcribe a meeting playing on this computer without joining it — pick its tab and
+            enable “Share audio”. Make sure participants consent to being recorded.
+          </p>
+        </>
+      )}
+      {!deviceAudioSupported && (
+        <p className="hint">
+          To capture a meeting playing on this phone: put it on speaker and use Record meeting.
+        </p>
+      )}
 
       <button
         className="btn btn-secondary"
