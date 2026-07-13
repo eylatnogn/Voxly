@@ -17,7 +17,7 @@ export function SpeakerLegend() {
       <h2>Speakers</h2>
       <p className="hint">
         Live: tagged by pitch &amp; tone. Refined transcripts use neural voice fingerprints for
-        higher accuracy. Click a name to edit it{speakers.length > 1 ? '; ⇄ retags every line of one speaker as another' : ''}.
+        higher accuracy. Click a name to edit it{speakers.length > 1 ? '; Merge retags every line of one speaker as another' : ''}.
       </p>
       <ul>
         {speakers.map((speaker) => (
@@ -41,13 +41,13 @@ export function SpeakerLegend() {
                 aria-label={`Merge ${speaker.name} into another speaker`}
               >
                 <option value="" disabled>
-                  ⇄
+                  Merge
                 </option>
                 {speakers
                   .filter((other) => other.id !== speaker.id)
                   .map((other) => (
                     <option key={other.id} value={other.id}>
-                      → {other.name}
+                      Into {other.name}
                     </option>
                   ))}
               </select>

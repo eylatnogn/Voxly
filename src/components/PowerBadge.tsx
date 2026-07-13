@@ -7,7 +7,7 @@ export function PowerBadge() {
   const saverActive = power.profile === 'saver' || power.autoSaver
   const batteryText =
     power.batteryLevel !== null
-      ? `${Math.round(power.batteryLevel * 100)}%${power.charging ? ' ⚡' : ''}`
+      ? `${Math.round(power.batteryLevel * 100)}%${power.charging ? ' · charging' : ''}`
       : null
 
   return (
@@ -24,7 +24,7 @@ export function PowerBadge() {
             : 'Battery saver: lower analysis rate, meter off, slower re-analysis'
         }
       >
-        🔋 Saver {saverActive ? 'on' : 'off'}
+        Battery saver {saverActive ? 'on' : 'off'}
       </button>
     </div>
   )

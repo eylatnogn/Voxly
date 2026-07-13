@@ -441,7 +441,7 @@ export class LiveTranscriber {
       return
     }
     store.setError(
-      'The system took the microphone (a call or another app). Recording stopped — everything captured so far is kept: tap "✨ Refine transcript" to transcribe it.',
+      'The system took the microphone (a call or another app). Recording stopped — everything captured so far is kept and can be transcribed with Refine transcript.',
     )
   }
 

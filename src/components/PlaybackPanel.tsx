@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react'
 import { useVoxlyStore } from '../store'
+import { IconDownload } from './icons'
 
 function extensionFor(mime: string): string {
   if (mime.includes('mp4') || mime.includes('m4a')) return 'm4a'
@@ -70,7 +71,7 @@ export function PlaybackPanel() {
           href={url}
           download={`voxly-recording.${extensionFor(blob.type)}`}
         >
-          ⬇ Download audio
+          <IconDownload /> Download audio
         </a>
       </div>
       <p className="hint">Tap a timestamp in the transcript to play from that moment.</p>

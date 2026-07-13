@@ -177,7 +177,10 @@ body {
 /* ─── Buttons ─────────────────────────────────────────────────────────── */
 
 .btn {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
   width: 100%;
   padding: 0.65rem 0.95rem;
   border-radius: 10px;
@@ -524,11 +527,15 @@ body {
 }
 
 .playback-actions .btn {
-  display: inline-block;
+  display: inline-flex;
   width: auto;
   font-size: 0.82rem;
   padding: 0.35rem 0.7rem;
   text-decoration: none;
+}
+
+.btn svg {
+  flex-shrink: 0;
 }
 
 .segment-flag {
@@ -698,8 +705,8 @@ body {
 
 .speaker-merge {
   flex-shrink: 0;
-  width: 2.1rem;
-  padding: 0.15rem 0.25rem;
+  width: auto;
+  padding: 0.15rem 0.45rem;
   border-radius: 7px;
   border: 1px solid var(--panel-border);
   background: transparent;

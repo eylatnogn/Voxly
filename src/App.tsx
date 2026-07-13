@@ -75,8 +75,8 @@ export default function App() {
       </main>
 
       <footer className="app-footer">
-        <span>🔒 Everything runs on this device — audio and transcripts never leave your browser.</span>
-        <span>🔋 Battery-first: analysis idles when you do.</span>
+        <span>Private by design — audio and transcripts never leave this device.</span>
+        <span>Battery-aware — analysis idles when you do.</span>
       </footer>
     </div>
   )

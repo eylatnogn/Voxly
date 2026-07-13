@@ -3,6 +3,7 @@ import { LiveTranscriber, isLiveTranscriptionSupported } from '../lib/liveTransc
 import { transcribeFile } from '../lib/fileTranscriber'
 import { currentDutyCycle } from '../lib/power'
 import { useVoxlyStore } from '../store'
+import { IconMic, IconRefine, IconScreen, IconStop, IconUpload } from './icons'
 
 const LANGUAGES: Array<[code: string, label: string]> = [
   ['en-US', 'English (US)'],
@@ -72,7 +73,7 @@ export function RecorderPanel() {
     }
     if (segments.filter((s) => !s.interim).length === 0) {
       setError(
-        'Live captions didn’t capture anything this session, but the audio was recorded. Tap "✨ Refine transcript" to transcribe it on this device.',
+        'Live captions didn’t capture anything this session, but the audio was recorded. Select Refine transcript to process it on this device.',
       )
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -215,7 +216,7 @@ export function RecorderPanel() {
 
       {mode === 'live' ? (
         <button className="btn btn-stop" onClick={stopLive}>
-          ■ Stop recording
+          <IconStop /> Stop recording
         </button>
       ) : (
         <button
@@ -223,7 +224,7 @@ export function RecorderPanel() {
           onClick={() => void startLive()}
           disabled={mode === 'file'}
         >
-          ● Record meeting
+          <IconMic /> Record meeting
         </button>
       )}
       {!liveSupported && mode !== 'live' && (
@@ -283,9 +284,9 @@ export function RecorderPanel() {
             className="btn btn-secondary"
             onClick={() => void startDeviceAudio()}
             disabled={mode !== 'idle'}
-            title="Transcribe a meeting or video playing on this computer — pick its tab (or entire screen) and enable “Share audio”. Captions are on-device (~6 s); the full transcript arrives on stop."
+            title="Transcribe a meeting or video playing on this computer — pick its tab (or entire screen) and enable “Share audio”. Captions are generated on-device (about 6 second cadence); the full transcript arrives on stop."
           >
-            🖥 Capture device audio
+            <IconScreen /> Capture device audio
           </button>
           <p className="hint">
             Transcribe a meeting playing on this computer without joining it — pick its tab and
@@ -304,7 +305,7 @@ export function RecorderPanel() {
         onClick={() => fileInputRef.current?.click()}
         disabled={mode !== 'idle'}
       >
-        ⬆ Transcribe audio file
+        <IconUpload /> Transcribe audio file
       </button>
       <input
         ref={fileInputRef}
@@ -331,7 +332,7 @@ export function RecorderPanel() {
       {recordingBlob && audioKind === 'live' && mode === 'idle' && !autoRefine && (
         <>
           <button className="btn btn-refine" onClick={refine}>
-            ✨ Refine transcript
+            <IconRefine /> Refine transcript
           </button>
           <p className="hint">
             Re-transcribes the captured recording with the on-device Whisper model — catches
