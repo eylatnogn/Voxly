@@ -6,6 +6,7 @@ import {
   transcriptToTxt,
 } from '../lib/exporters'
 import { useVoxlyStore } from '../store'
+import { IconCheck, IconDownload, IconSave } from './icons'
 import type { Speaker } from '../types'
 
 function formatTime(seconds: number): string {
@@ -128,12 +129,12 @@ export function TranscriptView() {
         <h2>Transcript</h2>
         <div className="export-buttons">
           <button className="btn btn-ghost" onClick={onSaveDraft}>
-            {justSaved ? '✓ Saved' : '💾 Save draft'}
+            {justSaved ? <><IconCheck /> Saved</> : <><IconSave /> Save draft</>}
           </button>
-          <button className="btn btn-ghost" onClick={exportTxt}>⬇ .txt</button>
-          <button className="btn btn-ghost" onClick={exportSrt}>⬇ .srt</button>
+          <button className="btn btn-ghost" onClick={exportTxt}><IconDownload /> .txt</button>
+          <button className="btn btn-ghost" onClick={exportSrt}><IconDownload /> .srt</button>
           <button className="btn btn-ghost" onClick={() => void exportDocx()} disabled={exporting}>
-            {exporting ? '…' : '⬇ Word'}
+            {exporting ? '…' : <><IconDownload /> Word</>}
           </button>
         </div>
       </div>
@@ -176,13 +177,13 @@ export function TranscriptView() {
                     onClick={() => requestSeek(segment.startTime)}
                     title="Play the audio from here"
                   >
-                    ▸ {formatTime(segment.startTime)}
+                    {formatTime(segment.startTime)}
                   </button>
                 ) : (
                   <span className="segment-time">{formatTime(segment.startTime)}</span>
                 )}
                 {flaggedSegmentIds.has(segment.id) && (
-                  <span className="segment-flag">✎ needs cleanup</span>
+                  <span className="segment-flag">needs cleanup</span>
                 )}
               </div>
               <p className="segment-text">{segment.text}</p>

@@ -45,7 +45,7 @@ export function SuggestionsPanel() {
         <p className="hint">
           {segments.length === 0
             ? 'Suggestions appear here once there is a transcript to analyze.'
-            : 'No cleanup suggestions — the script reads clean. ✓'}
+            : 'No cleanup suggestions — the script reads clean.'}
         </p>
       ) : (
         <>
