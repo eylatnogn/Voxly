@@ -1,3 +1,4 @@
+import { summarize, summaryIsEmpty, summaryToText } from './summarizer'
 import type { Speaker, TranscriptSegment } from '../types'
 
 /**
@@ -32,9 +33,12 @@ function formatSrtTime(seconds: number): string {
 }
 
 export function transcriptToTxt(segments: TranscriptSegment[], speakers: Speaker[]): string {
-  return finalSegments(segments)
+  const body = finalSegments(segments)
     .map((s) => `[${formatClock(s.startTime)}] ${speakerName(s.speakerId, speakers)}: ${s.text}`)
     .join('\n\n')
+  const summary = summarize(segments, 'meeting')
+  if (summaryIsEmpty(summary)) return body
+  return `${summaryToText(summary, speakers)}\n\n${'='.repeat(40)}\nTRANSCRIPT\n\n${body}`
 }
 
 export function transcriptToSrt(segments: TranscriptSegment[], speakers: Speaker[]): string {
@@ -57,7 +61,50 @@ export async function transcriptToDocx(
 ): Promise<Blob> {
   const { Document, HeadingLevel, Packer, Paragraph, TextRun } = await import('docx')
 
+  const summary = summarize(segments, 'meeting')
+  const summaryChildren = summaryIsEmpty(summary)
+    ? []
+    : [
+        new Paragraph({ text: 'Summary', heading: HeadingLevel.HEADING_1 }),
+        ...summary.overview.map((s) => new Paragraph({ text: s, spacing: { after: 120 } })),
+        ...(summary.keyPoints.length > 0
+          ? [
+              new Paragraph({ text: 'Key points', heading: HeadingLevel.HEADING_2 }),
+              ...summary.keyPoints.map(
+                (s) => new Paragraph({ text: s, bullet: { level: 0 } }),
+              ),
+            ]
+          : []),
+        ...(summary.actionItems.length > 0
+          ? [
+              new Paragraph({ text: 'Action items', heading: HeadingLevel.HEADING_2 }),
+              ...summary.actionItems.map(
+                (a) =>
+                  new Paragraph({
+                    bullet: { level: 0 },
+                    children: [
+                      new TextRun({ text: `${a.text} ` }),
+                      new TextRun({
+                        text: `— ${speakerName(a.ownerId, speakers)}`,
+                        italics: true,
+                        color: '666666',
+                      }),
+                    ],
+                  }),
+              ),
+            ]
+          : []),
+        ...(summary.decisions.length > 0
+          ? [
+              new Paragraph({ text: 'Decisions', heading: HeadingLevel.HEADING_2 }),
+              ...summary.decisions.map((s) => new Paragraph({ text: s, bullet: { level: 0 } })),
+            ]
+          : []),
+        new Paragraph({ text: '' }),
+      ]
+
   const children = [
+    ...summaryChildren,
     new Paragraph({ text: 'Meeting transcript', heading: HeadingLevel.HEADING_1 }),
     ...finalSegments(segments).map(
       (segment) =>
