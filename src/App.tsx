@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { RecorderPanel } from './components/RecorderPanel'
 import { TranscriptView } from './components/TranscriptView'
+import { SummaryPanel } from './components/SummaryPanel'
 import { SuggestionsPanel } from './components/SuggestionsPanel'
 import { SpeakerLegend } from './components/SpeakerLegend'
 import { DraftsPanel } from './components/DraftsPanel'
@@ -38,6 +39,7 @@ export default function App() {
   }, [segments, scheduleAnalysis])
 
   const mode = useVoxlyStore((s) => s.mode)
+  const [view, setView] = useState<'transcript' | 'summary'>('transcript')
 
   return (
     <div className={`app${mode === 'live' ? ' app-recording' : ''}`}>
@@ -67,7 +69,25 @@ export default function App() {
           <DraftsPanel />
         </aside>
         <section className="transcript-column">
-          <TranscriptView />
+          <div className="view-tabs" role="tablist">
+            <button
+              role="tab"
+              aria-selected={view === 'transcript'}
+              className={`view-tab${view === 'transcript' ? ' view-tab-active' : ''}`}
+              onClick={() => setView('transcript')}
+            >
+              Transcript
+            </button>
+            <button
+              role="tab"
+              aria-selected={view === 'summary'}
+              className={`view-tab${view === 'summary' ? ' view-tab-active' : ''}`}
+              onClick={() => setView('summary')}
+            >
+              Summary
+            </button>
+          </div>
+          {view === 'transcript' ? <TranscriptView /> : <SummaryPanel />}
         </section>
         <aside className="suggestions-column">
           <SuggestionsPanel />
