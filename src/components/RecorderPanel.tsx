@@ -129,16 +129,13 @@ export function RecorderPanel() {
   const deviceAudioSupported =
     typeof navigator !== 'undefined' && 'getDisplayMedia' in (navigator.mediaDevices ?? {})
 
-  /**
-   * Transcribe the computer's own audio (a meeting tab, a video, any app
-   * audio the browser can capture) — no microphone involved.
-   */
-  const startDeviceAudio = async () => {
+  /** Prompt for tab/system audio; null if cancelled or no audio shared. */
+  const pickDisplayAudio = async (): Promise<MediaStream | null> => {
     let display: MediaStream
     try {
       display = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
     } catch {
-      return // user cancelled the picker
+      return null // user cancelled the picker
     }
     // Only the audio is needed; drop video immediately so nothing heavy runs.
     display.getVideoTracks().forEach((t) => t.stop())
@@ -148,17 +145,50 @@ export function RecorderPanel() {
       setError(
         'No audio was shared. In the share picker, choose the meeting tab (or entire screen) and turn ON “Share audio”, then try again.',
       )
-      return
+      return null
     }
+    return new MediaStream(audioTracks)
+  }
+
+  /**
+   * Transcribe the computer's own audio (a meeting tab, a video, any app
+   * audio the browser can capture) — no microphone involved.
+   */
+  const startDeviceAudio = async () => {
+    const external = await pickDisplayAudio()
+    if (!external) return
     clearSession()
     const transcriber = new LiveTranscriber()
     try {
-      await transcriber.start(lang, new MediaStream(audioTracks))
+      await transcriber.start(lang, { external })
       transcriberRef.current = transcriber
       setMode('live')
     } catch (error) {
-      audioTracks.forEach((t) => t.stop())
+      external.getTracks().forEach((t) => t.stop())
       setError(error instanceof Error ? error.message : 'Could not capture device audio.')
+    }
+  }
+
+  /**
+   * MEETING MODE: microphone + the meeting's audio mixed into one session,
+   * so both sides of a call are captured — headphones allowed.
+   */
+  const startMeetingMode = async () => {
+    const external = await pickDisplayAudio()
+    if (!external) return
+    clearSession()
+    const transcriber = new LiveTranscriber()
+    try {
+      await transcriber.start(lang, { external, mixMic: true })
+      transcriberRef.current = transcriber
+      setMode('live')
+    } catch (error) {
+      external.getTracks().forEach((t) => t.stop())
+      setError(
+        error instanceof Error
+          ? error.message
+          : 'Could not start meeting capture (microphone or shared audio unavailable).',
+      )
     }
   }
 
@@ -282,16 +312,25 @@ export function RecorderPanel() {
         <>
           <button
             className="btn btn-secondary"
-            onClick={() => void startDeviceAudio()}
+            onClick={() => void startMeetingMode()}
             disabled={mode !== 'idle'}
-            title="Transcribe a meeting or video playing on this computer — pick its tab (or entire screen) and enable “Share audio”. Captions are generated on-device (about 6 second cadence); the full transcript arrives on stop."
+            title="Records your microphone AND the meeting's audio together — both sides of the call in one transcript, headphones allowed. Pick the meeting tab (or entire screen) and enable “Share audio”."
           >
-            <IconScreen /> Capture device audio
+            <IconScreen /> Record me + meeting
           </button>
           <p className="hint">
-            Transcribe a meeting playing on this computer without joining it — pick its tab and
-            enable “Share audio”. Make sure participants consent to being recorded.
+            Captures your voice and the call audio together — ideal for Teams, Zoom, or Meet on
+            this computer. Pick the meeting's tab (or entire screen) and enable “Share audio”.
+            Make sure participants consent to being recorded.
           </p>
+          <button
+            className="btn btn-secondary"
+            onClick={() => void startDeviceAudio()}
+            disabled={mode !== 'idle'}
+            title="Transcribe only what this computer is playing (no microphone) — pick the tab or screen and enable “Share audio”."
+          >
+            <IconScreen /> Capture device audio only
+          </button>
         </>
       )}
       {!deviceAudioSupported && (

@@ -32,9 +32,16 @@ const ADAPT_FLOOR = 0.001
 /** Max multiplicative gain change per analysis frame — smooth, no pumping. */
 const ADAPT_STEP = 0.15
 
+export interface CaptureSources {
+  /** Tab/system audio (from getDisplayMedia) to capture. */
+  external?: MediaStream
+  /** Mix the microphone in alongside the external stream (meeting mode). */
+  mixMic?: boolean
+}
+
 export class MicFeatureCapture {
   private context: AudioContext | null = null
-  private stream: MediaStream | null = null
+  private streams: MediaStream[] = []
   private analyser: AnalyserNode | null = null
   private gainNode: GainNode | null = null
   private boostedOut: MediaStreamAudioDestinationNode | null = null
@@ -58,22 +65,34 @@ export class MicFeatureCapture {
 
   /** Amplified stream for the session recorder. */
   get recordingStream(): MediaStream | null {
-    return this.boostedOut?.stream ?? this.stream
+    return this.boostedOut?.stream ?? this.streams[0] ?? null
   }
 
   /**
-   * @param externalStream capture this stream (e.g. tab/system audio from
-   * getDisplayMedia) instead of opening the microphone. The rest of the
-   * pipeline — adaptive gain, analysis, recording — is identical.
+   * Sources:
+   * - no options → microphone (default)
+   * - {external} → tab/system audio only
+   * - {external, mixMic: true} → MEETING MODE: microphone and the meeting's
+   *   audio mixed into one signal, so both sides of a call are captured
+   *   even with headphones on.
+   * The rest of the pipeline — adaptive gain, analysis, recording — is
+   * identical in every mode.
    */
-  async start(externalStream?: MediaStream): Promise<void> {
-    this.stream =
-      externalStream ??
-      (await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      }))
-    for (const track of this.stream.getAudioTracks()) {
-      track.addEventListener('ended', this.handleTrackEnded)
+  async start(sources?: CaptureSources): Promise<void> {
+    this.streams = []
+    if (!sources?.external || sources.mixMic) {
+      this.streams.push(
+        await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        }),
+      )
+    }
+    if (sources?.external) this.streams.push(sources.external)
+
+    for (const stream of this.streams) {
+      for (const track of stream.getAudioTracks()) {
+        track.addEventListener('ended', this.handleTrackEnded)
+      }
     }
     this.context = new AudioContext()
     // Mobile browsers can move the context to 'suspended'/'interrupted'
@@ -84,7 +103,6 @@ export class MicFeatureCapture {
         void this.context.resume()
       }
     }
-    const source = this.context.createMediaStreamSource(this.stream)
     this.analyser = this.context.createAnalyser()
     this.analyser.fftSize = 2048
 
@@ -97,7 +115,11 @@ export class MicFeatureCapture {
     limiter.attack.value = 0.004
     limiter.release.value = 0.2
     this.boostedOut = this.context.createMediaStreamDestination()
-    source.connect(this.gainNode)
+    // All sources feed one gain stage — in meeting mode this mixes the mic
+    // and the call audio into a single mono-analysis / stereo-record signal.
+    for (const stream of this.streams) {
+      this.context.createMediaStreamSource(stream).connect(this.gainNode)
+    }
     this.gainNode.connect(limiter)
     limiter.connect(this.analyser)
     limiter.connect(this.boostedOut)
@@ -232,13 +254,15 @@ export class MicFeatureCapture {
     this.stopPcmTap()
     if (this.timer !== null) clearTimeout(this.timer)
     this.timer = null
-    this.stream?.getTracks().forEach((t) => {
-      t.removeEventListener('ended', this.handleTrackEnded)
-      t.stop()
-    })
+    for (const stream of this.streams) {
+      stream.getTracks().forEach((t) => {
+        t.removeEventListener('ended', this.handleTrackEnded)
+        t.stop()
+      })
+    }
     void this.context?.close()
     this.context = null
-    this.stream = null
+    this.streams = []
     this.analyser = null
     this.gainNode = null
     this.boostedOut = null

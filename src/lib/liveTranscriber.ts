@@ -106,19 +106,20 @@ export class LiveTranscriber {
     return this.fallbackActive ? 'on-device' : 'browser'
   }
 
-  /** True when transcribing device/tab audio rather than the microphone. */
+  /** True when the session includes device/tab audio (with or without mic). */
   private systemAudio = false
 
   /**
-   * @param externalStream transcribe this stream (tab/system audio) instead
-   * of the microphone. The browser recognizer can only hear the mic, so
-   * these sessions caption entirely with the on-device engine.
+   * @param sources capture sources. With `external` set (tab/system audio,
+   * optionally mixed with the mic in meeting mode), the browser recognizer
+   * can't hear the full mix, so these sessions caption entirely with the
+   * on-device engine.
    */
-  async start(lang: string, externalStream?: MediaStream): Promise<void> {
+  async start(lang: string, sources?: import('./micFeatures').CaptureSources): Promise<void> {
     const Ctor = getSpeechRecognition()
-    this.systemAudio = Boolean(externalStream)
+    this.systemAudio = Boolean(sources?.external)
 
-    await this.mic.start(externalStream)
+    await this.mic.start(sources)
     this.mic.onTrackEnded = () => this.handleMicRevoked()
     this.tagger.reset()
     this.greedy.reset()
