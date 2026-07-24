@@ -51,6 +51,7 @@ export class MicFeatureCapture {
   private frames: VoiceFrame[] = []
   private startedAt = 0
   private buffer: Float32Array<ArrayBuffer> = new Float32Array(2048)
+  private maxGain = MAX_GAIN
 
   /** Latest RMS level (0..1) for the UI meter. */
   level = 0
@@ -79,6 +80,10 @@ export class MicFeatureCapture {
    * identical in every mode.
    */
   async start(sources?: CaptureSources): Promise<void> {
+    // Tab/system audio is already line-level — the far-field boost that helps
+    // a distant mic just amplifies silence, hum, and compression artifacts,
+    // which Whisper then hallucinates over.
+    this.maxGain = sources?.external ? 3 : MAX_GAIN
     this.streams = []
     if (!sources?.external || sources.mixMic) {
       this.streams.push(
@@ -161,27 +166,41 @@ export class MicFeatureCapture {
     if (!this.analyser || !this.context) return
     this.analyser.getFloatTimeDomainData(this.buffer)
 
-    // Adapt gain from the post-gain energy: quiet speech ramps the boost up,
-    // loud speech brings it back down. Silence leaves it untouched.
-    let sumSquares = 0
-    for (let i = 0; i < this.buffer.length; i++) {
-      sumSquares += this.buffer[i] * this.buffer[i]
-    }
-    const energy = Math.sqrt(sumSquares / this.buffer.length)
-    if (energy > ADAPT_FLOOR && this.gainNode) {
-      const ratio = TARGET_SPEECH_RMS / energy
+    const time = (performance.now() - this.startedAt) / 1000
+    // Analyze with a permissive gate so quiet speech is still examined…
+    const probe = analyzeFrame(this.buffer, this.context.sampleRate, time, ADAPT_FLOOR)
+
+    // …but adapt gain ONLY on voiced speech. Adapting on raw energy ramped
+    // the boost during silence, amplifying background hum to speech level —
+    // which the on-device transcriber then hallucinated over.
+    if (probe && probe.pitchHz > 0 && probe.energy > ADAPT_FLOOR && this.gainNode) {
+      const ratio = TARGET_SPEECH_RMS / probe.energy
       const step = Math.min(Math.max(ratio, 1 - ADAPT_STEP), 1 + ADAPT_STEP)
-      this.gainNode.gain.value = Math.min(MAX_GAIN, Math.max(MIN_GAIN, this.gainNode.gain.value * step))
+      this.gainNode.gain.value = Math.min(
+        this.maxGain,
+        Math.max(MIN_GAIN, this.gainNode.gain.value * step),
+      )
     }
 
-    const time = (performance.now() - this.startedAt) / 1000
-    const frame = analyzeFrame(this.buffer, this.context.sampleRate, time, FAR_FIELD_ENERGY_GATE)
+    const frame = probe && probe.energy >= FAR_FIELD_ENERGY_GATE ? probe : null
     this.level = frame ? Math.min(1, frame.energy * 5) : 0
     if (frame) {
       this.frames.push(frame)
       // Bound memory if no utterance boundary arrives for a long time.
       if (this.frames.length > 600) this.frames.splice(0, this.frames.length - 600)
     }
+  }
+
+  /** Voiced frames observed in the trailing window — cheap speech presence. */
+  voicedFramesInLast(windowSec: number): number {
+    const cutoff = (performance.now() - this.startedAt) / 1000 - windowSec
+    let count = 0
+    for (let i = this.frames.length - 1; i >= 0; i--) {
+      const frame = this.frames[i]
+      if (frame.time < cutoff) break
+      if (frame.pitchHz > 0) count++
+    }
+    return count
   }
 
   /**

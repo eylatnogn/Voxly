@@ -1,3 +1,4 @@
+import { sanitizeAsrText } from './asrSanitizer'
 import { GreedyCaption } from './greedyCaptions'
 import { MicFeatureCapture } from './micFeatures'
 import { SpeakerTagger } from './speakerTagger'
@@ -258,7 +259,11 @@ export class LiveTranscriber {
         const msg = event.data as { type: string; chunks?: Array<{ text: string }> }
         if (msg.type === 'result') {
           this.fallbackBusy = false
-          const text = (msg.chunks ?? []).map((c) => c.text).join(' ').trim()
+          // Scrub hallucination loops (Whisper on non-speech audio) before
+          // anything reaches the transcript.
+          const text = sanitizeAsrText(
+            (msg.chunks ?? []).map((c) => c.text).join(' ').trim(),
+          )
           // Drop results that land after the primary engine recovered.
           if (this.running && this.fallbackActive && text) this.finalizeUtterance(text)
         } else if (msg.type === 'error') {
@@ -283,6 +288,10 @@ export class LiveTranscriber {
     let sumSquares = 0
     for (let i = 0; i < pcm.length; i += 4) sumSquares += pcm[i] * pcm[i]
     if (Math.sqrt(sumSquares / (pcm.length / 4)) < 0.004) return
+    // Energy alone isn't speech — hold music, beeps, and amplified hum all
+    // pass an RMS check. Require actual voiced frames in the chunk window,
+    // or Whisper hallucinates text over the noise.
+    if (this.mic.voicedFramesInLast(FALLBACK_CHUNK_SECONDS + 1) < 4) return
 
     const audio = downsampleTo16k(pcm, sampleRate)
     this.fallbackBusy = true

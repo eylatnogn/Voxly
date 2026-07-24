@@ -1,3 +1,4 @@
+import { sanitizeAsrText } from './asrSanitizer'
 import {
   adaptiveClusterEmbeddings,
   assignWordSpeakers,
@@ -111,6 +112,12 @@ export async function transcribeFile(file: File): Promise<void> {
         ? wordsToSegments(timed, regions)
         : chunksToSegments(timed, regions)
   }
+
+  // Scrub Whisper hallucination loops (repetition spam over silence/music)
+  // out of the final transcript.
+  segments = segments
+    .map((s) => ({ ...s, text: sanitizeAsrText(s.text) }))
+    .filter((s) => s.text.length > 0)
 
   useVoxlyStore.getState().replaceSegments(segments)
   useVoxlyStore.getState().setFileProgress(null, null)
