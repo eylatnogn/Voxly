@@ -371,6 +371,40 @@ body {
   transition: width 120ms linear;
 }
 
+.link-row {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+}
+
+.link-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.5rem 0.65rem;
+  border-radius: 9px;
+  border: 1px solid var(--panel-border);
+  background: #0d1119;
+  color: var(--text);
+  font-size: 0.83rem;
+  font-family: inherit;
+}
+
+.link-input::placeholder {
+  color: var(--text-faint);
+}
+
+.link-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.link-go {
+  width: auto;
+  flex-shrink: 0;
+  padding: 0.5rem 0.9rem;
+  font-size: 0.85rem;
+}
+
 .file-progress {
   margin-top: 0.8rem;
   font-size: 0.85rem;

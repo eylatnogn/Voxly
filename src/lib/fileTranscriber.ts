@@ -52,7 +52,9 @@ export async function transcribeFile(file: File): Promise<void> {
   } catch {
     store.setMode('idle')
     store.setFileProgress(null, null)
-    store.setError('Could not decode that file. Supported formats: wav, mp3, m4a, ogg, webm, flac.')
+    store.setError(
+      'Could not decode that file. Supported: audio (wav, mp3, m4a, ogg, flac) and video with a standard audio track (mp4, webm, mov).',
+    )
     return
   }
 

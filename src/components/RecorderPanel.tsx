@@ -47,6 +47,8 @@ export function RecorderPanel() {
   const [autoRefine, setAutoRefine] = useState(
     () => localStorage.getItem('voxly-auto-refine') !== 'off',
   )
+  const [linkUrl, setLinkUrl] = useState('')
+  const [fetchingLink, setFetchingLink] = useState(false)
   const lastRefinedRef = useRef<Blob | null>(null)
   const liveSupported = isLiveTranscriptionSupported()
 
@@ -204,6 +206,43 @@ export function RecorderPanel() {
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
+  /**
+   * Fetch a direct media URL and run it through the file pipeline. Only
+   * works for links that allow browser access (CORS) — streaming platforms
+   * don't, and the error says so plainly.
+   */
+  const transcribeLink = async () => {
+    const url = linkUrl.trim()
+    if (!url) return
+    let parsed: URL
+    try {
+      parsed = new URL(url)
+      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') throw new Error()
+    } catch {
+      setError('That doesn’t look like a valid link — paste a full URL starting with https://')
+      return
+    }
+    setFetchingLink(true)
+    setError(null)
+    try {
+      const response = await fetch(parsed.href)
+      if (!response.ok) throw new Error(`the server answered ${response.status}`)
+      const blob = await response.blob()
+      if (blob.size === 0) throw new Error('the link returned an empty file')
+      if (blob.size > 800 * 1024 * 1024) throw new Error('the file is larger than 800 MB')
+      const name = parsed.pathname.split('/').pop() || 'linked-media'
+      setLinkUrl('')
+      void transcribeFile(new File([blob], name, { type: blob.type }))
+    } catch (error) {
+      const detail = error instanceof Error && error.message ? ` (${error.message})` : ''
+      setError(
+        `Couldn’t fetch that link${detail}. Streaming sites like YouTube, Vimeo, SharePoint, and Teams block browser access to their media — download the file there and use “Transcribe audio or video file” instead. Direct links to .mp3/.mp4/.wav files work when the host allows it.`,
+      )
+    } finally {
+      setFetchingLink(false)
+    }
+  }
+
   const refine = () => {
     if (!recordingBlob) return
     lastRefinedRef.current = recordingBlob
@@ -343,18 +382,46 @@ export function RecorderPanel() {
         className="btn btn-secondary"
         onClick={() => fileInputRef.current?.click()}
         disabled={mode !== 'idle'}
+        title="Audio (wav, mp3, m4a, ogg, flac) or video (mp4, webm, mov) — the audio track is extracted and transcribed on this device."
       >
-        <IconUpload /> Transcribe audio file
+        <IconUpload /> Transcribe audio or video file
       </button>
       <input
         ref={fileInputRef}
         type="file"
-        accept="audio/*,video/webm,video/mp4"
+        accept="audio/*,video/*"
         hidden
         onChange={(e) => onFileChosen(e.target.files?.[0])}
       />
+
+      <form
+        className="link-row"
+        onSubmit={(e) => {
+          e.preventDefault()
+          void transcribeLink()
+        }}
+      >
+        <input
+          type="url"
+          className="link-input"
+          placeholder="Or paste a direct media link (.mp3, .mp4, …)"
+          value={linkUrl}
+          onChange={(e) => setLinkUrl(e.target.value)}
+          disabled={mode !== 'idle'}
+          aria-label="Direct link to an audio or video file"
+        />
+        <button
+          type="submit"
+          className="btn btn-secondary link-go"
+          disabled={mode !== 'idle' || !linkUrl.trim() || fetchingLink}
+        >
+          {fetchingLink ? '…' : 'Fetch'}
+        </button>
+      </form>
       <p className="hint">
-        Files are transcribed entirely on this device — nothing is uploaded.
+        Files and links are transcribed entirely on this device — nothing is uploaded. Links
+        must point directly at a media file; streaming sites (YouTube, SharePoint, …) block
+        browser access, so download those and upload the file instead.
       </p>
 
       {mode === 'file' && (
