@@ -405,6 +405,10 @@ body {
   font-size: 0.85rem;
 }
 
+.caption-status {
+  color: var(--accent);
+}
+
 .file-progress {
   margin-top: 0.8rem;
   font-size: 0.85rem;

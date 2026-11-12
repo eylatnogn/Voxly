@@ -42,6 +42,7 @@ export function RecorderPanel() {
   const [micLevel, setMicLevel] = useState(0)
   const [micBoost, setMicBoost] = useState(1)
   const [captionEngine, setCaptionEngine] = useState<'browser' | 'on-device'>('browser')
+  const [captionStatus, setCaptionStatus] = useState('')
   const [lang, setLang] = useState(defaultLanguage)
   const [elapsed, setElapsed] = useState(0)
   const [autoRefine, setAutoRefine] = useState(
@@ -112,6 +113,7 @@ export function RecorderPanel() {
       setMicLevel(transcriberRef.current?.micLevel ?? 0)
       setMicBoost(transcriberRef.current?.micBoost ?? 1)
       setCaptionEngine(transcriberRef.current?.captionEngine ?? 'browser')
+      setCaptionStatus(transcriberRef.current?.captionStatus ?? '')
     }, interval)
     return () => clearInterval(timer)
   }, [mode])
@@ -336,7 +338,8 @@ export function RecorderPanel() {
           <div className="mic-meter" aria-hidden="true">
             <div className="mic-meter-fill" style={{ width: `${Math.round(micLevel * 100)}%` }} />
           </div>
-          {elapsed > 12 && segments.filter((s) => !s.interim).length === 0 && (
+          {captionStatus && <p className="hint caption-status">{captionStatus}</p>}
+          {!captionStatus && elapsed > 12 && segments.filter((s) => !s.interim).length === 0 && (
             <p className="hint">
               Captions warming up — the recording is already capturing everything, and the
               on-device engine steps in automatically if the browser stays quiet.

@@ -191,16 +191,23 @@ export class MicFeatureCapture {
     }
   }
 
-  /** Voiced frames observed in the trailing window — cheap speech presence. */
-  voicedFramesInLast(windowSec: number): number {
+  /**
+   * Voiced vs total analysis frames in the trailing window — cheap speech
+   * presence. Callers must gate on the RATIO, not an absolute count: in a
+   * hidden tab (the normal case during a meeting — the user is on the call's
+   * tab) browsers clamp timers, so only ~1 frame/second arrives.
+   */
+  voicedStatsInLast(windowSec: number): { voiced: number; total: number } {
     const cutoff = (performance.now() - this.startedAt) / 1000 - windowSec
-    let count = 0
+    let voiced = 0
+    let total = 0
     for (let i = this.frames.length - 1; i >= 0; i--) {
       const frame = this.frames[i]
       if (frame.time < cutoff) break
-      if (frame.pitchHz > 0) count++
+      total++
+      if (frame.pitchHz > 0) voiced++
     }
-    return count
+    return { voiced, total }
   }
 
   /**
