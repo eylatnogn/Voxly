@@ -63,3 +63,47 @@ export function sanitizeAsrText(text: string): string {
 
   return out.join(' ')
 }
+
+/** Lowercased, punctuation-stripped form for comparing chunk outputs. */
+export function normalizeForDedupe(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s']/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
+ * Whisper's stock outputs for silence, noise, and music — short stereotyped
+ * phrases it was trained into by subtitle credits. A chunk consisting of
+ * nothing but one of these is near-certainly not something anyone said.
+ */
+const SILENCE_PHRASES = new Set([
+  'you',
+  'bye',
+  'bye bye',
+  'thank you',
+  'thank you bye',
+  'thanks',
+  'thank you very much',
+  'thanks for watching',
+  'thank you for watching',
+  'thank you so much for watching',
+  'see you next time',
+  'see you in the next video',
+  'please subscribe',
+  'subscribe',
+  'music',
+  'applause',
+  'silence',
+  'the end',
+  "we'll see you next time",
+  "i'll see you next time",
+])
+
+export function isLikelySilenceHallucination(text: string): boolean {
+  const normalized = normalizeForDedupe(text)
+  if (!normalized) return true
+  if (normalized.split(' ').length > 7) return false
+  return SILENCE_PHRASES.has(normalized)
+}

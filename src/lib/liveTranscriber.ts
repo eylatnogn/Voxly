@@ -1,4 +1,4 @@
-import { sanitizeAsrText } from './asrSanitizer'
+import { isLikelySilenceHallucination, normalizeForDedupe, sanitizeAsrText } from './asrSanitizer'
 import { GreedyCaption } from './greedyCaptions'
 import { MicFeatureCapture } from './micFeatures'
 import { SpeakerTagger } from './speakerTagger'
@@ -89,6 +89,11 @@ export class LiveTranscriber {
   private fallbackActive = false
   private fallbackBusy = false
   private fallbackNoticeShown = false
+  /** Newest chunk that arrived while inference was busy — latest wins. */
+  private pendingChunk: Float32Array | null = null
+  private lastFallbackText = ''
+  /** Human-readable on-device caption state ('' when captions flow), for UI. */
+  captionStatus = ''
   private recorder: MediaRecorder | null = null
   private recordedChunks: Blob[] = []
   private wakeLock: { release: () => Promise<void> } | null = null
@@ -124,6 +129,9 @@ export class LiveTranscriber {
     this.mic.onTrackEnded = () => this.handleMicRevoked()
     this.tagger.reset()
     this.greedy.reset()
+    this.lastFallbackText = ''
+    this.pendingChunk = null
+    this.captionStatus = ''
     this.running = true
     this.restartAttempts = 0
     this.recogFailures = 0
@@ -256,18 +264,44 @@ export class LiveTranscriber {
         type: 'module',
       })
       this.fallbackWorker.onmessage = (event: MessageEvent) => {
-        const msg = event.data as { type: string; chunks?: Array<{ text: string }> }
+        const msg = event.data as {
+          type: string
+          chunks?: Array<{ text: string }>
+          message?: string
+          progress?: number
+        }
         if (msg.type === 'result') {
           this.fallbackBusy = false
+          this.captionStatus = ''
           // Scrub hallucination loops (Whisper on non-speech audio) before
           // anything reaches the transcript.
           const text = sanitizeAsrText(
             (msg.chunks ?? []).map((c) => c.text).join(' ').trim(),
           )
-          // Drop results that land after the primary engine recovered.
-          if (this.running && this.fallbackActive && text) this.finalizeUtterance(text)
+          // Whisper emits stock phrases ("Thank you.") on near-silence, one
+          // per chunk — which read as the same message repeating forever.
+          // Drop known silence tics and exact repeats of the previous chunk;
+          // also drop results that land after the primary engine recovered.
+          const normalized = normalizeForDedupe(text)
+          if (
+            this.running &&
+            this.fallbackActive &&
+            text &&
+            !isLikelySilenceHallucination(text) &&
+            normalized !== this.lastFallbackText
+          ) {
+            this.lastFallbackText = normalized
+            this.finalizeUtterance(text)
+          }
+          this.drainPendingChunk()
+        } else if (msg.type === 'progress' && typeof msg.progress === 'number') {
+          this.captionStatus = `downloading caption model ${msg.progress}%`
+        } else if (msg.type === 'status' && msg.message) {
+          this.captionStatus = msg.message
         } else if (msg.type === 'error') {
           this.fallbackBusy = false
+          this.captionStatus = ''
+          this.drainPendingChunk()
         }
       }
     }
@@ -283,19 +317,39 @@ export class LiveTranscriber {
 
   private onFallbackChunk(pcm: Float32Array, sampleRate: number): void {
     if (!this.running || !this.fallbackActive || !this.fallbackWorker) return
-    if (this.fallbackBusy) return // device slower than realtime — skip a chunk
     // Skip silent chunks entirely.
     let sumSquares = 0
     for (let i = 0; i < pcm.length; i += 4) sumSquares += pcm[i] * pcm[i]
     if (Math.sqrt(sumSquares / (pcm.length / 4)) < 0.004) return
     // Energy alone isn't speech — hold music, beeps, and amplified hum all
-    // pass an RMS check. Require actual voiced frames in the chunk window,
-    // or Whisper hallucinates text over the noise.
-    if (this.mic.voicedFramesInLast(FALLBACK_CHUNK_SECONDS + 1) < 4) return
+    // pass an RMS check. Require voiced frames, but gate on the RATIO: in a
+    // hidden tab (the user is on the meeting's tab) analysis runs at ~1
+    // frame/second, so an absolute count would discard real speech.
+    const { voiced, total } = this.mic.voicedStatsInLast(FALLBACK_CHUNK_SECONDS + 1)
+    if (voiced < 2 || (total > 0 && voiced / total < 0.2)) return
 
     const audio = downsampleTo16k(pcm, sampleRate)
+    if (this.fallbackBusy) {
+      // Model still loading or device slower than realtime: hold the NEWEST
+      // chunk instead of dropping it, so captions start the moment the
+      // engine frees up rather than a full chunk later.
+      this.pendingChunk = audio
+      return
+    }
+    this.sendFallbackAudio(audio)
+  }
+
+  private sendFallbackAudio(audio: Float32Array): void {
+    if (!this.fallbackWorker) return
     this.fallbackBusy = true
     this.fallbackWorker.postMessage({ type: 'transcribe', audio, quick: true }, [audio.buffer])
+  }
+
+  private drainPendingChunk(): void {
+    if (!this.pendingChunk || !this.running || !this.fallbackActive) return
+    const audio = this.pendingChunk
+    this.pendingChunk = null
+    this.sendFallbackAudio(audio)
   }
 
   private handleResult(event: SpeechRecognitionEventLike): void {
@@ -468,6 +522,8 @@ export class LiveTranscriber {
     this.fallbackWorker?.terminate()
     this.fallbackWorker = null
     this.fallbackBusy = false
+    this.pendingChunk = null
+    this.captionStatus = ''
     this.recognition?.stop()
     this.recognition = null
     // Whatever was being said when the user hit stop belongs in the
